@@ -32,7 +32,7 @@ MIN_HOLDING_PERIOD = 5
 
 # Flag to skip optimization
 SKIP_OPTIMIZATION = False  # Set to True to use default parameters
-OPTIMIZATION_TRIALS = 1000
+OPTIMIZATION_TRIALS = 700
 
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
@@ -83,7 +83,7 @@ def calculate_dynamic_slippage(entry_price):
     
     return min(slippage, max_slippage)
 
-def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, feature_cols, target_cols):
     """Run trading strategy with given parameters"""
     model_params = {
         'n_estimators': 50,
@@ -99,7 +99,7 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
         'device': 'cpu'  # Changed from 'cuda' to 'cpu' for consistency
     }
     # Initialize predicted change column
-    df['Predicted_Change'] = np.nan
+    df_window['Predicted_Change'] = np.nan
     
     # Simulate trading with model retraining every retrain_interval bars
     capital = INITIAL_CAPITAL
@@ -109,13 +109,13 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
     holdout_predictions = []
     holdout_actuals = []
     rolling_metrics = []
-    equity_curve = pd.Series(index=df['Date'], data=INITIAL_CAPITAL, dtype=np.float64)
+    equity_curve = pd.Series(index=df_window['Date'], data=INITIAL_CAPITAL, dtype=np.float64)
     
-    n = len(df)
+    n = len(df_window)
     
     # Initialize model and feature importance for first window
     print("\nInitializing first window...")
-    initial_window = df.iloc[:window_size].copy()
+    initial_window = df_window.iloc[:window_size].copy()
     initial_features = calculate_feature_importance(
         initial_window, 
         feature_cols, 
@@ -150,7 +150,7 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
         if total_data_processed >= window_size:
             print(f"\nRecalculating feature importance at index {start}...")
             # Use only past data for feature selection
-            feature_selection_data = df.iloc[start-window_size:start].copy()
+            feature_selection_data = df_window.iloc[start-window_size:start].copy()
             current_features = calculate_feature_importance(
                 feature_selection_data,
                 feature_cols,
@@ -160,8 +160,8 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
                 visualize_importance=False
             )
             total_data_processed = 0  # Reset counter after recalculation
-        current_holdout = df.iloc[start:end].copy()
-        current_train = df.iloc[:start].copy()
+        current_holdout = df_window.iloc[start:end].copy()
+        current_train = df_window.iloc[:start].copy()
 
         # Prepare features for current training data
         current_X_train = current_train[current_features].copy()
@@ -193,7 +193,7 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
         chunk_predictions = current_model.predict(current_X_holdout)
 
         # Store predictions in the DataFrame
-        df.loc[df.index[start:end], 'Predicted_Change'] = chunk_predictions
+        df_window.loc[df_window.index[start:end], 'Predicted_Change'] = chunk_predictions
 
         holdout_predictions.extend(chunk_predictions)
         holdout_actuals.extend(current_y_holdout)    
@@ -211,11 +211,10 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
             'Directional_Accuracy': chunk_dir_acc,
             'Training_Size': len(current_train)
         })
-        #print(rolling_metrics[-1])
         
         # Run trading for this window
         for idx in range(start, end):
-            row = df.iloc[idx]
+            row = df_window.iloc[idx]
             
             # Update open trades
             closed_trades = []
@@ -328,9 +327,9 @@ def run_strategy(df, min_risk_percentage, max_risk_percentage, risk_scaling_fact
     
     # Close any remaining open trades
     for trade in open_trades:
-        exit_price = df.iloc[-1]['Close'] * (1 - SLIPPAGE)
+        exit_price = df_window.iloc[-1]['Close'] * (1 - SLIPPAGE)
         profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-        trade['exit_idx'] = len(df) - 1
+        trade['exit_idx'] = len(df_window) - 1
         trade['exit_price'] = exit_price
         trade['result'] = 'EOD'
         trade['profit'] = profit
@@ -419,7 +418,7 @@ def save_top_parameters(study, symbol):
     
     # Save to JSON
     os.makedirs('Parameters', exist_ok=True)
-    params_file = f'Parameters/{symbol}.json'
+    params_file = f'Parameters/{symbol}_Full_Optimization.json'
     with open(params_file, 'w') as f:
         json.dump(params_to_save, f, indent=4)
     print(f"\nTop 10 parameters saved to {params_file}")
@@ -440,7 +439,7 @@ def objective(trial):
     # retrain_interval = trial.suggest_int('retrain_interval', 50, 5000)
     
     # Run strategy with current parameters
-    metrics = run_strategy(df, min_risk, max_risk, scaling_factor, reward_ratio, min_predicted_move, window_size, retrain_interval)
+    metrics = run_strategy(df, min_risk, max_risk, scaling_factor, reward_ratio, min_predicted_move, window_size, retrain_interval, feature_cols, target_cols)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -477,223 +476,229 @@ def objective(trial):
     
     return composite_score
 
-# Load and prepare data
-data_path = f"DB/{symbol}_15min_indicators.csv"
-df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
-# df = df.iloc[:int(len(df))//8]
-# if 'Unnamed: 0' in df.columns:
-#     df['Date'] = pd.to_datetime(df['Unnamed: 0'])
-#     df = df.drop('Unnamed: 0', axis=1)
-# elif 'Date' in df.columns:
-#     df['Date'] = pd.to_datetime(df['Date'])
-# df = df.sort_values('Date').reset_index(drop=True)
-# df = df.dropna(subset=feature_cols)
 
-# Run optimization or use default parameters
-if SKIP_OPTIMIZATION:
-    print("\nUsing default parameters (optimization skipped)")
-    print(f"Min Risk: {DEFAULT_MIN_RISK:.3f}")
-    print(f"Max Risk: {DEFAULT_MAX_RISK:.3f}")
-    print(f"Risk Scaling: {DEFAULT_SCALING}")
-    print(f"Risk:Reward: {DEFAULT_RR}")
-    print(f"Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
-    print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
-    print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
-    
-    best_metrics = run_strategy(df, 
-                                DEFAULT_MIN_RISK,
-                                DEFAULT_MAX_RISK, 
-                                DEFAULT_SCALING, 
-                                DEFAULT_RR, 
-                                DEFAULT_MIN_PREDICTED_MOVE, 
-                                DEFAULT_WINDOW_SIZE, 
-                                DEFAULT_RETREIN_INTERVAL)
-    
-    # Calculate composite score
-    composite_score = (
-        best_metrics['total_return'] / 
-        (abs(best_metrics['max_drawdown']) + 1e-8) * 
-        np.sqrt(best_metrics['win_rate'] / 100)
-    )
-    
-    results = [{
-        'min_risk_percentage': DEFAULT_MIN_RISK,
-        'max_risk_percentage': DEFAULT_MAX_RISK,
-        'risk_scaling_factor': DEFAULT_SCALING,
-        'risk_reward_ratio': DEFAULT_RR,
-        'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
-        'window_size': DEFAULT_WINDOW_SIZE,
-        'retrain_interval': DEFAULT_RETREIN_INTERVAL,
-        'total_return': best_metrics['total_return'],
-        'final_capital': best_metrics['final_capital'],
-        'sharpe_ratio': best_metrics['sharpe_ratio'],
-        'win_rate': best_metrics['win_rate'],
-        'max_drawdown': best_metrics['max_drawdown'],
-        'trade_count': best_metrics['trade_count'],
-        'composite_score': composite_score,
-        'equity_curve': best_metrics['equity_curve'],
-        'trade_history': best_metrics['trade_history']
-    }]
-else:
-    print("\nRunning Optuna optimization...")
-    # Create Optuna study with multi-objective optimization
-    study = optuna.create_study(
-        direction='maximize',
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
-    )
-    
-    # Run optimization
-    study.optimize(objective, n_trials=OPTIMIZATION_TRIALS, show_progress_bar=True)
-    
+if __name__ == "__main__":
+    # Load and prepare data
+    data_path = f"DB/{symbol}_15min_indicators.csv"
+    df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
+    # df = df.iloc[:int(len(df))//8]
+    # if 'Unnamed: 0' in df.columns:
+    #     df['Date'] = pd.to_datetime(df['Unnamed: 0'])
+    #     df = df.drop('Unnamed: 0', axis=1)
+    # elif 'Date' in df.columns:
+    #     df['Date'] = pd.to_datetime(df['Date'])
+    # df = df.sort_values('Date').reset_index(drop=True)
+    # df = df.dropna(subset=feature_cols)
+
+    # Run optimization or use default parameters
+    if SKIP_OPTIMIZATION:
+        print("\nUsing default parameters (optimization skipped)")
+        print(f"Min Risk: {DEFAULT_MIN_RISK:.3f}")
+        print(f"Max Risk: {DEFAULT_MAX_RISK:.3f}")
+        print(f"Risk Scaling: {DEFAULT_SCALING}")
+        print(f"Risk:Reward: {DEFAULT_RR}")
+        print(f"Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
+        print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
+        print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
+        
+        best_metrics = run_strategy(df, 
+                                    DEFAULT_MIN_RISK,
+                                    DEFAULT_MAX_RISK, 
+                                    DEFAULT_SCALING, 
+                                    DEFAULT_RR, 
+                                    DEFAULT_MIN_PREDICTED_MOVE, 
+                                    DEFAULT_WINDOW_SIZE, 
+                                    DEFAULT_RETREIN_INTERVAL,
+                                    feature_cols,
+                                    target_cols)
+        
+        # Calculate composite score
+        composite_score = (
+            best_metrics['total_return'] / 
+            (abs(best_metrics['max_drawdown']) + 1e-8) * 
+            np.sqrt(best_metrics['win_rate'] / 100)
+        )
+        
+        results = [{
+            'min_risk_percentage': DEFAULT_MIN_RISK,
+            'max_risk_percentage': DEFAULT_MAX_RISK,
+            'risk_scaling_factor': DEFAULT_SCALING,
+            'risk_reward_ratio': DEFAULT_RR,
+            'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
+            'window_size': DEFAULT_WINDOW_SIZE,
+            'retrain_interval': DEFAULT_RETREIN_INTERVAL,
+            'total_return': best_metrics['total_return'],
+            'final_capital': best_metrics['final_capital'],
+            'sharpe_ratio': best_metrics['sharpe_ratio'],
+            'win_rate': best_metrics['win_rate'],
+            'max_drawdown': best_metrics['max_drawdown'],
+            'trade_count': best_metrics['trade_count'],
+            'composite_score': composite_score,
+            'equity_curve': best_metrics['equity_curve'],
+            'trade_history': best_metrics['trade_history']
+        }]
+    else:
+        print("\nRunning Optuna optimization...")
+        # Create Optuna study with multi-objective optimization
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+        )
+        
+        # Run optimization
+        study.optimize(objective, n_trials=OPTIMIZATION_TRIALS, show_progress_bar=True)
+        
+        # Get best parameters
+        best_params = study.best_params
+        # Calculate actual window_size and retrain_interval from fractions
+        window_size = clamp(int(len(df) * best_params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
+        retrain_interval = max(int(window_size * best_params['retrain_fraction']), 10)
+        
+        best_metrics = run_strategy(
+            df,
+            best_params['min_risk_percentage'],
+            best_params['max_risk_percentage'],
+            best_params['risk_scaling_factor'],
+            best_params['risk_reward_ratio'],
+            best_params['min_predicted_move'],
+            window_size,
+            retrain_interval,
+            feature_cols,
+            target_cols
+        )
+        
+        # Calculate final composite score
+        final_composite_score = (
+            (0.4 * best_metrics['sharpe_ratio'] / 2.0) +
+            (0.4 * best_metrics['total_return'] / 100.0) -
+            (0.2 * abs(best_metrics['max_drawdown']) / 100.0)
+        )
+        
+        results = [{
+            'min_risk_percentage': best_params['min_risk_percentage'],
+            'max_risk_percentage': best_params['max_risk_percentage'],
+            'risk_scaling_factor': best_params['risk_scaling_factor'],
+            'risk_reward_ratio': best_params['risk_reward_ratio'],
+            'min_predicted_move': best_params['min_predicted_move'],
+            'window_fraction': best_params['window_fraction'],
+            'retrain_fraction': best_params['retrain_fraction'],
+            'window_size': window_size,
+            'retrain_interval': retrain_interval,
+            'total_return': best_metrics['total_return'],
+            'final_capital': best_metrics['final_capital'],
+            'sharpe_ratio': best_metrics['sharpe_ratio'],
+            'win_rate': best_metrics['win_rate'],
+            'max_drawdown': best_metrics['max_drawdown'],
+            'trade_count': best_metrics['trade_count'],
+            'composite_score': final_composite_score,
+            'equity_curve': best_metrics['equity_curve'],
+            'trade_history': best_metrics['trade_history']
+        }]
+
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+
     # Get best parameters
-    best_params = study.best_params
-    # Calculate actual window_size and retrain_interval from fractions
-    window_size = clamp(int(len(df) * best_params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = max(int(window_size * best_params['retrain_fraction']), 10)
-    
-    best_metrics = run_strategy(
-        df,
-        best_params['min_risk_percentage'],
-        best_params['max_risk_percentage'],
-        best_params['risk_scaling_factor'],
-        best_params['risk_reward_ratio'],
-        best_params['min_predicted_move'],
-        window_size,
-        retrain_interval
-    )
-    
-    # Calculate final composite score
-    final_composite_score = (
-        (0.4 * best_metrics['sharpe_ratio'] / 2.0) +
-        (0.4 * best_metrics['total_return'] / 100.0) -
-        (0.2 * abs(best_metrics['max_drawdown']) / 100.0)
-    )
-    
-    results = [{
-        'min_risk_percentage': best_params['min_risk_percentage'],
-        'max_risk_percentage': best_params['max_risk_percentage'],
-        'risk_scaling_factor': best_params['risk_scaling_factor'],
-        'risk_reward_ratio': best_params['risk_reward_ratio'],
-        'min_predicted_move': best_params['min_predicted_move'],
-        'window_fraction': best_params['window_fraction'],
-        'retrain_fraction': best_params['retrain_fraction'],
-        'window_size': window_size,
-        'retrain_interval': retrain_interval,
-        'total_return': best_metrics['total_return'],
-        'final_capital': best_metrics['final_capital'],
-        'sharpe_ratio': best_metrics['sharpe_ratio'],
-        'win_rate': best_metrics['win_rate'],
-        'max_drawdown': best_metrics['max_drawdown'],
-        'trade_count': best_metrics['trade_count'],
-        'composite_score': final_composite_score,
-        'equity_curve': best_metrics['equity_curve'],
-        'trade_history': best_metrics['trade_history']
-    }]
+    best_params = results_df.iloc[0]
+    print("\nBest Parameters:")
+    print(f"Min Risk: {best_params['min_risk_percentage']:.3f}")
+    print(f"Max Risk: {best_params['max_risk_percentage']:.3f}")
+    print(f"Risk Scaling: {best_params['risk_scaling_factor']:.2f}")
+    print(f"Risk:Reward: {best_params['risk_reward_ratio']:.2f}")
+    print(f"Min Predicted Move: {best_params['min_predicted_move']:.3f}")
+    print(f"Window Size: {best_params['window_size']}")
+    print(f"Retrain Interval: {best_params['retrain_interval']}")
+    print(f"\nPerformance Metrics:")
+    print(f"Total Return: {best_params['total_return']:.2f}%")
+    print(f"Final Capital: ${best_params['final_capital']:,.2f}")
+    print(f"Sharpe Ratio: {best_params['sharpe_ratio']:.2f}")
+    print(f"Win Rate: {best_params['win_rate']:.2f}%")
+    print(f"Max Drawdown: {best_params['max_drawdown']:.2f}%")
+    print(f"Trade Count: {best_params['trade_count']}")
+    print(f"Composite Score: {best_params['composite_score']:.2f}")
 
-# Convert results to DataFrame
-results_df = pd.DataFrame(results)
+    # Plot best equity curve
+    plt.figure(figsize=(15, 10))
 
-# Get best parameters
-best_params = results_df.iloc[0]
-print("\nBest Parameters:")
-print(f"Min Risk: {best_params['min_risk_percentage']:.3f}")
-print(f"Max Risk: {best_params['max_risk_percentage']:.3f}")
-print(f"Risk Scaling: {best_params['risk_scaling_factor']:.2f}")
-print(f"Risk:Reward: {best_params['risk_reward_ratio']:.2f}")
-print(f"Min Predicted Move: {best_params['min_predicted_move']:.3f}")
-print(f"Window Size: {best_params['window_size']}")
-print(f"Retrain Interval: {best_params['retrain_interval']}")
-print(f"\nPerformance Metrics:")
-print(f"Total Return: {best_params['total_return']:.2f}%")
-print(f"Final Capital: ${best_params['final_capital']:,.2f}")
-print(f"Sharpe Ratio: {best_params['sharpe_ratio']:.2f}")
-print(f"Win Rate: {best_params['win_rate']:.2f}%")
-print(f"Max Drawdown: {best_params['max_drawdown']:.2f}%")
-print(f"Trade Count: {best_params['trade_count']}")
-print(f"Composite Score: {best_params['composite_score']:.2f}")
+    # Split the timeline into 4 phases
+    total_points = len(best_params['equity_curve'])
+    phase_size = total_points // 4
 
-# Plot best equity curve
-plt.figure(figsize=(15, 10))
+    # Create subplots for each phase
+    for i in range(4):
+        start_idx = i * phase_size
+        end_idx = (i + 1) * phase_size if i < 3 else total_points
+        
+        plt.subplot(2, 2, i + 1)
+        phase_data = best_params['equity_curve'].iloc[start_idx:end_idx]
+        plt.plot(phase_data.index, phase_data.values)
+        plt.title(f'Phase {i + 1} Equity Curve')
+        plt.xlabel('Date')
+        plt.ylabel('Capital ($)')
+        plt.grid(True)
+        
+        # Add phase statistics
+        phase_returns = phase_data.pct_change().dropna()
+        phase_sharpe = calculate_sharpe_ratio(phase_returns)
+        phase_drawdown = calculate_max_drawdown(phase_data) * 100
+        plt.text(0.02, 0.98, f'Sharpe: {phase_sharpe:.2f}\nMax DD: {phase_drawdown:.2f}%', 
+                transform=plt.gca().transAxes, verticalalignment='top')
 
-# Split the timeline into 4 phases
-total_points = len(best_params['equity_curve'])
-phase_size = total_points // 4
+    plt.tight_layout()
+    plt.savefig('DB/charts/best_equity_curve_phases.png')
+    print("\nPhase-wise equity curves saved to DB/charts/best_equity_curve_phases.png")
 
-# Create subplots for each phase
-for i in range(4):
-    start_idx = i * phase_size
-    end_idx = (i + 1) * phase_size if i < 3 else total_points
-    
-    plt.subplot(2, 2, i + 1)
-    phase_data = best_params['equity_curve'].iloc[start_idx:end_idx]
-    plt.plot(phase_data.index, phase_data.values)
-    plt.title(f'Phase {i + 1} Equity Curve')
+    # Also save the original full equity curve
+    plt.figure(figsize=(12, 6))
+    plt.plot(best_params['equity_curve'].index, best_params['equity_curve'].values)
+    plt.title('Best Parameter Set Equity Curve (Full Timeline)')
     plt.xlabel('Date')
     plt.ylabel('Capital ($)')
     plt.grid(True)
-    
-    # Add phase statistics
-    phase_returns = phase_data.pct_change().dropna()
-    phase_sharpe = calculate_sharpe_ratio(phase_returns)
-    phase_drawdown = calculate_max_drawdown(phase_data) * 100
-    plt.text(0.02, 0.98, f'Sharpe: {phase_sharpe:.2f}\nMax DD: {phase_drawdown:.2f}%', 
-             transform=plt.gca().transAxes, verticalalignment='top')
+    plt.tight_layout()
+    plt.savefig('DB/charts/best_equity_curve_full.png')
+    print("Full equity curve saved to DB/charts/best_equity_curve_full.png")
 
-plt.tight_layout()
-plt.savefig('DB/charts/best_equity_curve_phases.png')
-print("\nPhase-wise equity curves saved to DB/charts/best_equity_curve_phases.png")
+    # Save results
+    results_df.to_csv('DB/parameter_optimization_results.csv', index=False)
+    best_params['trade_history'].to_csv('DB/best_parameter_trade_history.csv', index=False)
+    print("\nResults saved to DB/parameter_optimization_results.csv")
+    print("Best trade history saved to DB/best_parameter_trade_history.csv")
 
-# Also save the original full equity curve
-plt.figure(figsize=(12, 6))
-plt.plot(best_params['equity_curve'].index, best_params['equity_curve'].values)
-plt.title('Best Parameter Set Equity Curve (Full Timeline)')
-plt.xlabel('Date')
-plt.ylabel('Capital ($)')
-plt.grid(True)
-plt.tight_layout()
-plt.savefig('DB/charts/best_equity_curve_full.png')
-print("Full equity curve saved to DB/charts/best_equity_curve_full.png")
+    # Save model with symbol-specific name
+    # model_path = f"DB/models/{symbol}_LiveDeployModel.joblib"
+    # joblib.dump({
+    #     'model': model,
+    #     'scaler': scaler,
+    #     'feature_cols': feature_cols,
+    #     'parameters': best_params.to_dict(),
+    #     'metrics': best_metrics
+    # }, model_path)
+    # print(f"\nLive deployment model saved to {model_path}")
 
-# Save results
-results_df.to_csv('DB/parameter_optimization_results.csv', index=False)
-best_params['trade_history'].to_csv('DB/best_parameter_trade_history.csv', index=False)
-print("\nResults saved to DB/parameter_optimization_results.csv")
-print("Best trade history saved to DB/best_parameter_trade_history.csv")
-
-# Save model with symbol-specific name
-# model_path = f"DB/models/{symbol}_LiveDeployModel.joblib"
-# joblib.dump({
-#     'model': model,
-#     'scaler': scaler,
-#     'feature_cols': feature_cols,
-#     'parameters': best_params.to_dict(),
-#     'metrics': best_metrics
-# }, model_path)
-# print(f"\nLive deployment model saved to {model_path}")
-
-# Save optimized parameters to JSON if optimization was run
-# if not SKIP_OPTIMIZATION:
-#     # Create Parameters directory if it doesn't exist
-#     os.makedirs('Parameters', exist_ok=True)
-    
-#     # Save parameters to JSON
-#     params_file = f'Parameters/{symbol}.json'
-#     params_to_save = {
-#         'max_risk_percentage': best_params['max_risk_percentage'],
-#         'risk_scaling_factor': best_params['risk_scaling_factor'],
-#         'risk_reward_ratio': best_params['risk_reward_ratio'],
-#         'min_predicted_move': best_params['min_predicted_move'],
-#         'optimization_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-#         'performance_metrics': {
-#             'total_return': best_metrics['total_return'],
-#             'sharpe_ratio': best_metrics['sharpe_ratio'],
-#             'win_rate': best_metrics['win_rate'],
-#             'max_drawdown': best_metrics['max_drawdown'],
-#             'trade_count': best_metrics['trade_count']
-#         }
-#     }
-    
-#     with open(params_file, 'w') as f:
-#         json.dump(params_to_save, f, indent=4)
-#     print(f"\nOptimized parameters saved to {params_file}")
+    # Save optimized parameters to JSON if optimization was run
+    # if not SKIP_OPTIMIZATION:
+    #     # Create Parameters directory if it doesn't exist
+    #     os.makedirs('Parameters', exist_ok=True)
+        
+    #     # Save parameters to JSON
+    #     params_file = f'Parameters/{symbol}.json'
+    #     params_to_save = {
+    #         'max_risk_percentage': best_params['max_risk_percentage'],
+    #         'risk_scaling_factor': best_params['risk_scaling_factor'],
+    #         'risk_reward_ratio': best_params['risk_reward_ratio'],
+    #         'min_predicted_move': best_params['min_predicted_move'],
+    #         'optimization_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    #         'performance_metrics': {
+    #             'total_return': best_metrics['total_return'],
+    #             'sharpe_ratio': best_metrics['sharpe_ratio'],
+    #             'win_rate': best_metrics['win_rate'],
+    #             'max_drawdown': best_metrics['max_drawdown'],
+    #             'trade_count': best_metrics['trade_count']
+    #         }
+    #     }
+        
+    #     with open(params_file, 'w') as f:
+    #         json.dump(params_to_save, f, indent=4)
+    #     print(f"\nOptimized parameters saved to {params_file}")
