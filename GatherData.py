@@ -851,7 +851,7 @@ if __name__ == "__main__":
     try:
         # Fetch data for a specific stock
         symbol = "TSLA"
-        df = fetch_data(symbol=symbol, interval="15min", outputsize="full", years=2)
+        df = fetch_data(symbol=symbol, interval="15min", outputsize="full", years=20)
         
         # Save to CSV
         df.to_csv(f"DB/{symbol}_15min_indicators.csv")

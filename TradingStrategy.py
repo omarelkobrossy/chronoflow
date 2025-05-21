@@ -9,47 +9,53 @@ import json
 from utils import preprocess_data, calculate_feature_importance, clamp
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
+from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
+# from Optimization.FAPT_Optimization import calculate_distribution_metrics
+import scipy.stats
 
 
 symbol = "TSLA"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.015
-DEFAULT_MAX_RISK = 0.0337 #0.036
-DEFAULT_SCALING = 1.96 #1.5
-DEFAULT_RR = 1.5 #1.5
-DEFAULT_MIN_PREDICTED_MOVE = 0.007 #0.009
-DEFAULT_WINDOW_SIZE = 791 #10000
-DEFAULT_RETREIN_INTERVAL = 610 #50
+DEFAULT_MIN_RISK = 0.006489884911079899
+DEFAULT_MAX_RISK = 0.009567915879945087
+DEFAULT_SCALING = 1.6949727011806939
+DEFAULT_RR = 1.6037213842177254
+DEFAULT_MIN_PREDICTED_MOVE = 0.005113433706915217
+DEFAULT_MIN_HOLDING_PERIOD = 8
+DEFAULT_MAX_HOLDING_PERIOD = 9
+DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
+DEFAULT_MAX_CONCURRENT_TRADES = 3
+DEFAULT_WINDOW_SIZE = 359
+DEFAULT_RETREIN_INTERVAL = 155
 
 # Fixed parameters
-INITIAL_CAPITAL = 10000
-MAX_CONCURRENT_TRADES = 5
+INITIAL_CAPITAL = 1000000
 SLIPPAGE = 0.0005
 TRANSACTION_FEE = 1.0
-MAX_HOLDING_PERIOD = 20
-MIN_HOLDING_PERIOD = 5
+
 
 # Flag to skip optimization
 SKIP_OPTIMIZATION = False  # Set to True to use default parameters
-OPTIMIZATION_TRIALS = 700
+USE_FAPT = False
+OPTIMIZATION_TRIALS = 350
+RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
 
-# # Load model and scaler
-# MODEL_PATH = "DB/models/price_prediction_model_final.joblib"
-# SCALER_PATH = "DB/models/final_scaler_final.joblib"
-# SELECTED_FEATURES_PATH = f"Features/{symbol}.json"
+if USE_FAPT:
+    stat_suffix = ['_mean', '_std', '_skew', '_kurtosis']
+    SKIP_OPTIMIZATION = True
+    global_market_weather_features = get_top_market_weather_features(symbol)
+    market_weather_features = {}
+    for feature in global_market_weather_features:
+        base_feature = feature.split('_mean')[0] if '_mean' in feature else feature.split('_std')[0] if '_std' in feature else feature.split('_skew')[0] if '_skew' in feature else feature.split('_kurtosis')[0]
+        if base_feature not in market_weather_features:
+            market_weather_features[base_feature] = []
+        stat_type = feature.split(base_feature + '_')[1] if '_' in feature else 'mean'
+        market_weather_features[base_feature].append(stat_type)
 
-# assert os.path.exists(MODEL_PATH), f"Model not found at {MODEL_PATH}"
-# assert os.path.exists(SCALER_PATH), f"Scaler not found at {SCALER_PATH}"
-# assert os.path.exists(SELECTED_FEATURES_PATH), f"Selected features file not found at {SELECTED_FEATURES_PATH}"
-
-# model = joblib.load(MODEL_PATH)
-# scaler = joblib.load(SCALER_PATH)
-
-# feature_cols = list(json.load(open(SELECTED_FEATURES_PATH)).keys())
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
     """Calculate Sharpe ratio from returns series"""
@@ -83,7 +89,7 @@ def calculate_dynamic_slippage(entry_price):
     
     return min(slippage, max_slippage)
 
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, feature_cols, target_cols):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols):
     """Run trading strategy with given parameters"""
     model_params = {
         'n_estimators': 50,
@@ -96,8 +102,9 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         'reg_lambda': 1.0,
         'random_state': 42,
         'tree_method': 'hist',
-        'device': 'cpu'  # Changed from 'cuda' to 'cpu' for consistency
+        'device': 'cpu'
     }
+    
     # Initialize predicted change column
     df_window['Predicted_Change'] = np.nan
     
@@ -105,7 +112,6 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     capital = INITIAL_CAPITAL
     open_trades = []
     trade_history = []
-    # Initialize lists to store predictions and actual values
     holdout_predictions = []
     holdout_actuals = []
     rolling_metrics = []
@@ -116,7 +122,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     # Initialize model and feature importance for first window
     print("\nInitializing first window...")
     initial_window = df_window.iloc[:window_size].copy()
-    initial_features = calculate_feature_importance(
+    current_features = calculate_feature_importance(
         initial_window, 
         feature_cols, 
         target_cols,
@@ -124,23 +130,23 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         save_importance=False,
         visualize_importance=False
     )
+    
     model = xgb.XGBRegressor(**model_params)
     
     # Scale initial window data
-    X_initial = initial_window[initial_features].copy()
-    for col in initial_features:
+    X_initial = df_window.iloc[:window_size][current_features].copy()
+    for col in current_features:
         # Use expanding mean/std for scaling with shift to prevent look-ahead bias
         mean = X_initial[col].expanding(min_periods=1).mean().shift(1)
         std = X_initial[col].expanding(min_periods=1).std().shift(1)
         X_initial[col] = (X_initial[col] - mean) / (std + 1e-8)
     
-    y_initial = initial_window[target_cols].values.ravel()
+    y_initial = df_window.iloc[:window_size][target_cols].values.ravel()
     model.fit(X_initial, y_initial)
     
     # Process data in chunks
     print("\nProcessing data in chunks...")
-    current_features = initial_features  # Start with initial features
-    total_data_processed = 0  # Track total data processed
+    total_data_processed = 0
     
     for start in range(window_size, n, retrain_interval):
         end = min(start + retrain_interval, n)
@@ -149,7 +155,6 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         # Recalculate feature importance every window_size worth of data
         if total_data_processed >= window_size:
             print(f"\nRecalculating feature importance at index {start}...")
-            # Use only past data for feature selection
             feature_selection_data = df_window.iloc[start-window_size:start].copy()
             current_features = calculate_feature_importance(
                 feature_selection_data,
@@ -159,7 +164,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 save_importance=False,
                 visualize_importance=False
             )
-            total_data_processed = 0  # Reset counter after recalculation
+            total_data_processed = 0
+        
         current_holdout = df_window.iloc[start:end].copy()
         current_train = df_window.iloc[:start].copy()
 
@@ -173,14 +179,9 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         
         # Scale features using rolling statistics
         for col in current_features:
-            # Use expanding mean/std for training
             mean = current_X_train[col].expanding(min_periods=1).mean().shift(1)
             std = current_X_train[col].expanding(min_periods=1).std().shift(1)
-            
-            # Standardize training data
             current_X_train[col] = (current_X_train[col] - mean) / (std + 1e-8)
-            
-            # Use the last mean and std from training for validation
             last_mean = mean.iloc[-1]
             last_std = std.iloc[-1]
             current_X_holdout[col] = (current_X_holdout[col] - last_mean) / (last_std + 1e-8)
@@ -191,8 +192,6 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
 
         # Make predictions on current holdout chunk
         chunk_predictions = current_model.predict(current_X_holdout)
-
-        # Store predictions in the DataFrame
         df_window.loc[df_window.index[start:end], 'Predicted_Change'] = chunk_predictions
 
         holdout_predictions.extend(chunk_predictions)
@@ -206,11 +205,44 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         rolling_metrics.append({
             'Start_Date': current_holdout.index[0],
             'End_Date': current_holdout.index[-1],
-            'MSE': chunk_mse * 100,  # Convert to percentage
+            'MSE': chunk_mse * 100,
             'R2': chunk_r2,
             'Directional_Accuracy': chunk_dir_acc,
             'Training_Size': len(current_train)
         })
+        
+        # Get current market weather metrics for FAPT if enabled
+        if USE_FAPT:
+            current_feature_metrics = {}
+            for feature, stat_types in market_weather_features.items():
+                feature_series = pd.Series(current_holdout[feature].values)
+                if feature_series.nunique() <= 2:  # Skip binary or constant features
+                    continue
+                    
+                for stat_type in stat_types:
+                    try:
+                        if stat_type == 'mean':
+                            current_feature_metrics[f"{feature}_mean"] = feature_series.mean()
+                        elif stat_type == 'std':
+                            current_feature_metrics[f"{feature}_std"] = feature_series.std()
+                        elif stat_type == 'skew':
+                            current_feature_metrics[f"{feature}_skew"] = scipy.stats.skew(feature_series)
+                        elif stat_type == 'kurtosis':
+                            current_feature_metrics[f"{feature}_kurtosis"] = scipy.stats.kurtosis(feature_series)
+                    except:
+                        continue
+            
+            # Get optimal parameters from FAPT
+            fapt_params = predict_optimal_parameters(current_feature_metrics, symbol)
+            min_risk_percentage = fapt_params['parameters']['min_risk_percentage']
+            max_risk_percentage = fapt_params['parameters']['max_risk_percentage']
+            risk_scaling_factor = fapt_params['parameters']['risk_scaling_factor']
+            risk_reward_ratio = fapt_params['parameters']['risk_reward_ratio']
+            min_predicted_move = fapt_params['parameters']['min_predicted_move']
+            partial_take_profit = fapt_params['parameters']['partial_take_profit']
+            min_holding_period = fapt_params['parameters']['min_holding_period']
+            max_holding_period = fapt_params['parameters']['max_holding_period']
+            max_concurrent_trades = fapt_params['parameters']['max_concurrent_trades']
         
         # Run trading for this window
         for idx in range(start, end):
@@ -243,17 +275,17 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     trade['profit'] = profit
                     trade_history.append(trade)
                     closed_trades.append(trade)
-                elif holding_period >= MIN_HOLDING_PERIOD:
+                elif holding_period >= min_holding_period:
                     projected_tp = trade['take_profit']
                     projected_entry = trade['entry_price']
-                    tp_80 = projected_entry + 0.8 * (projected_tp - projected_entry)
-                    if high >= tp_80:
-                        exit_price = tp_80 * (1 - SLIPPAGE)
+                    tp_partial = projected_entry + partial_take_profit * (projected_tp - projected_entry)
+                    if high >= tp_partial:
+                        exit_price = tp_partial * (1 - SLIPPAGE)
                         profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
                         capital += profit
                         trade['exit_idx'] = idx
                         trade['exit_price'] = exit_price
-                        trade['result'] = '80TP'
+                        trade['result'] = 'Partial TP'
                         trade['profit'] = profit
                         trade_history.append(trade)
                         closed_trades.append(trade)
@@ -268,7 +300,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         trade_history.append(trade)
                         closed_trades.append(trade)
                 
-                if holding_period >= MAX_HOLDING_PERIOD and trade not in closed_trades:
+                if holding_period >= max_holding_period and trade not in closed_trades:
                     exit_price = row['Close'] * (1 - SLIPPAGE)
                     profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
                     capital += profit
@@ -282,7 +314,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             open_trades = [t for t in open_trades if t not in closed_trades]
             
             # Entry logic
-            if len(open_trades) < MAX_CONCURRENT_TRADES:
+            if len(open_trades) < max_concurrent_trades:
                 if row['Predicted_Change'] < -min_predicted_move:
                     entry_price = row['Open'] * (1 + SLIPPAGE)
                     
@@ -372,7 +404,7 @@ def save_top_parameters(study, symbol):
     trials = study.trials
     
     # Filter out failed trials and create a list of successful trials with their scores
-    successful_trials = [(t.number, t.value, t.params) for t in trials if t.value is not None]
+    successful_trials = [(t.number, t.value, t.params, t.user_attrs) for t in trials if t.value is not None]
     
     # Sort by score (descending)
     successful_trials.sort(key=lambda x: x[1], reverse=True)
@@ -386,12 +418,53 @@ def save_top_parameters(study, symbol):
         'top_parameters': []
     }
     
+    # Create Visualization directory if it doesn't exist
+    os.makedirs('Visualization', exist_ok=True)
+    
     # Add each trial's parameters and metrics
-    for trial_num, score, params in top_10:
-        trial = study.trials[trial_num]
+    for i, (trial_num, score, params, attrs) in enumerate(top_10):
         # Calculate actual window_size and retrain_interval
         window_size = clamp(int(len(df) * params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
         retrain_interval = max(int(window_size * params['retrain_fraction']), 10)
+        
+        # Get the equity curve from trial attributes and convert back to Series
+        equity_curve_dict = attrs.get('equity_curve')
+        if equity_curve_dict is not None:
+            equity_curve = pd.Series(
+                data=equity_curve_dict['values'],
+                index=pd.to_datetime(equity_curve_dict['dates'])
+            )
+            
+            # Plot and save equity curve phases for this trial
+            plt.figure(figsize=(15, 10))
+            
+            # Split the timeline into 4 phases
+            total_points = len(equity_curve)
+            phase_size = total_points // 4
+            
+            # Create subplots for each phase
+            for j in range(4):
+                start_idx = j * phase_size
+                end_idx = (j + 1) * phase_size if j < 3 else total_points
+                
+                plt.subplot(2, 2, j + 1)
+                phase_data = equity_curve.iloc[start_idx:end_idx]
+                plt.plot(phase_data.index, phase_data.values)
+                plt.title(f'Phase {j + 1} Equity Curve')
+                plt.xlabel('Date')
+                plt.ylabel('Capital ($)')
+                plt.grid(True)
+                
+                # Add phase statistics
+                phase_returns = phase_data.pct_change().dropna()
+                phase_sharpe = calculate_sharpe_ratio(phase_returns)
+                phase_drawdown = calculate_max_drawdown(phase_data) * 100
+                plt.text(0.02, 0.98, f'Sharpe: {phase_sharpe:.2f}\nMax DD: {phase_drawdown:.2f}%', 
+                        transform=plt.gca().transAxes, verticalalignment='top')
+            
+            plt.tight_layout()
+            plt.savefig(f'Visualization/trial_{i+1}_equity_curve_phases.png')
+            plt.close()
         
         params_to_save['top_parameters'].append({
             'trial_number': trial_num,
@@ -402,17 +475,21 @@ def save_top_parameters(study, symbol):
                 'risk_scaling_factor': params['risk_scaling_factor'],
                 'risk_reward_ratio': params['risk_reward_ratio'],
                 'min_predicted_move': params['min_predicted_move'],
+                'partial_take_profit': params['partial_take_profit'],
+                'min_holding_period': params['min_holding_period'],
+                'max_holding_period': params['max_holding_period'],
+                'max_concurrent_trades': params['max_concurrent_trades'],
                 'window_fraction': params['window_fraction'],
                 'retrain_fraction': params['retrain_fraction'],
                 'calculated_window_size': window_size,
                 'calculated_retrain_interval': retrain_interval
             },
             'metrics': {
-                'total_return': trial.user_attrs.get('total_return', 0.0),
-                'sharpe_ratio': trial.user_attrs.get('sharpe_ratio', 0.0),
-                'win_rate': trial.user_attrs.get('win_rate', 0.0),
-                'max_drawdown': trial.user_attrs.get('max_drawdown', 0.0),
-                'trade_count': trial.user_attrs.get('trade_count', 0)
+                'total_return': attrs.get('total_return', 0.0),
+                'sharpe_ratio': attrs.get('sharpe_ratio', 0.0),
+                'win_rate': attrs.get('win_rate', 0.0),
+                'max_drawdown': attrs.get('max_drawdown', 0.0),
+                'trade_count': attrs.get('trade_count', 0)
             }
         })
     
@@ -422,6 +499,7 @@ def save_top_parameters(study, symbol):
     with open(params_file, 'w') as f:
         json.dump(params_to_save, f, indent=4)
     print(f"\nTop 10 parameters saved to {params_file}")
+    print(f"Top 10 equity curve phase graphs saved to Visualization folder")
 
 def objective(trial):
     """Objective function for Optuna optimization"""
@@ -435,11 +513,26 @@ def objective(trial):
     retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
     window_size = clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
     retrain_interval = max(int(window_size * retrain_fraction), 10)
-    # window_size = trial.suggest_int('window_size', 50, 15000)
-    # retrain_interval = trial.suggest_int('retrain_interval', 50, 5000)
+    partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
+    min_holding_period = trial.suggest_int('min_holding_period', 5, 20)
+    max_holding_period = trial.suggest_int('max_holding_period', min_holding_period, 40)
+    max_concurrent_trades = trial.suggest_int('max_concurrent_trades', 1, 10)
     
     # Run strategy with current parameters
-    metrics = run_strategy(df, min_risk, max_risk, scaling_factor, reward_ratio, min_predicted_move, window_size, retrain_interval, feature_cols, target_cols)
+    metrics = run_strategy(df, 
+                           min_risk, 
+                           max_risk, 
+                           scaling_factor, 
+                           reward_ratio, 
+                           min_predicted_move, 
+                           window_size, 
+                           retrain_interval, 
+                           partial_take_profit, 
+                           min_holding_period, 
+                           max_holding_period, 
+                           max_concurrent_trades,
+                           feature_cols, 
+                           target_cols)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -452,24 +545,24 @@ def objective(trial):
     trial.set_user_attr('max_drawdown', metrics['max_drawdown'])
     trial.set_user_attr('trade_count', metrics['trade_count'])
     
+    # Convert equity curve to JSON serializable format
+    equity_curve_dict = {
+        'dates': metrics['equity_curve'].index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+        'values': metrics['equity_curve'].values.tolist()
+    }
+    trial.set_user_attr('equity_curve', equity_curve_dict)
+    
     # Calculate composite score that balances multiple objectives
-    # 1. Normalize metrics to similar scales
     normalized_sharpe = metrics['sharpe_ratio']  # Assuming max Sharpe around 2.0
     normalized_return = metrics['total_return'] / 100.0  # Convert percentage to decimal
     normalized_drawdown = abs(metrics['max_drawdown']) / 100.0  # Convert percentage to decimal
     
-    # 2. Calculate weights for each objective
+    # Calculate weights for each objective
     sharpe_weight = 0.4  # 40% weight to Sharpe ratio
     return_weight = 0.4  # 40% weight to total return
     drawdown_weight = 0.2  # 20% weight to minimizing drawdown
     
-    # 3. Calculate composite score
-    # composite_score = (
-    #     (sharpe_weight * normalized_sharpe) +
-    #     (return_weight * normalized_return) -
-    #     (drawdown_weight * normalized_drawdown)
-    # )
-    composite_score = normalized_sharpe
+    composite_score = -normalized_drawdown
     
     # Save top parameters after each trial
     save_top_parameters(study, symbol)
@@ -481,15 +574,12 @@ if __name__ == "__main__":
     # Load and prepare data
     data_path = f"DB/{symbol}_15min_indicators.csv"
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
-    # df = df.iloc[:int(len(df))//8]
-    # if 'Unnamed: 0' in df.columns:
-    #     df['Date'] = pd.to_datetime(df['Unnamed: 0'])
-    #     df = df.drop('Unnamed: 0', axis=1)
-    # elif 'Date' in df.columns:
-    #     df['Date'] = pd.to_datetime(df['Date'])
-    # df = df.sort_values('Date').reset_index(drop=True)
-    # df = df.dropna(subset=feature_cols)
-
+    
+    # Filter data by time range
+    start_date = '2015-04-01'  # Format: 'YYYY-MM-DD'
+    end_date = '2019-03-01'    # Format: 'YYYY-MM-DD'
+    df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+    
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:
         print("\nUsing default parameters (optimization skipped)")
@@ -498,9 +588,12 @@ if __name__ == "__main__":
         print(f"Risk Scaling: {DEFAULT_SCALING}")
         print(f"Risk:Reward: {DEFAULT_RR}")
         print(f"Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
+        print(f"Partial Take Profit: {DEFAULT_PARTIAL_TAKE_PROFIT:.3f}")
+        print(f"Min Holding Period: {DEFAULT_MIN_HOLDING_PERIOD}")
+        print(f"Max Holding Period: {DEFAULT_MAX_HOLDING_PERIOD}")
+        print(f"Max Concurrent Trades: {DEFAULT_MAX_CONCURRENT_TRADES}")
         print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
         print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
-        
         best_metrics = run_strategy(df, 
                                     DEFAULT_MIN_RISK,
                                     DEFAULT_MAX_RISK, 
@@ -509,6 +602,10 @@ if __name__ == "__main__":
                                     DEFAULT_MIN_PREDICTED_MOVE, 
                                     DEFAULT_WINDOW_SIZE, 
                                     DEFAULT_RETREIN_INTERVAL,
+                                    DEFAULT_PARTIAL_TAKE_PROFIT,
+                                    DEFAULT_MIN_HOLDING_PERIOD,
+                                    DEFAULT_MAX_HOLDING_PERIOD,
+                                    DEFAULT_MAX_CONCURRENT_TRADES,
                                     feature_cols,
                                     target_cols)
         
@@ -527,6 +624,10 @@ if __name__ == "__main__":
             'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
             'window_size': DEFAULT_WINDOW_SIZE,
             'retrain_interval': DEFAULT_RETREIN_INTERVAL,
+            'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
+            'min_holding_period': DEFAULT_MIN_HOLDING_PERIOD,
+            'max_holding_period': DEFAULT_MAX_HOLDING_PERIOD,
+            'max_concurrent_trades': DEFAULT_MAX_CONCURRENT_TRADES,
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
             'sharpe_ratio': best_metrics['sharpe_ratio'],
@@ -539,15 +640,57 @@ if __name__ == "__main__":
         }]
     else:
         print("\nRunning Optuna optimization...")
-        # Create Optuna study with multi-objective optimization
-        study = optuna.create_study(
-            direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
-        )
         
-        # Run optimization
-        study.optimize(objective, n_trials=OPTIMIZATION_TRIALS, show_progress_bar=True)
+        # Create storage for the study
+        storage_name = f"sqlite:///DB/{symbol}_study.db"
+        
+        # Handle study resumption
+        if RESUME_STUDY is None:
+            # Check if study exists
+            try:
+                study = optuna.load_study(study_name=symbol, storage=storage_name)
+                print(f"\nFound existing study with {len(study.trials)} trials. Resuming...")
+            except:
+                print("\nNo existing study found. Starting new study...")
+                study = optuna.create_study(
+                    study_name=symbol,
+                    storage=storage_name,
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(seed=42),
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                )
+        elif RESUME_STUDY:
+            try:
+                study = optuna.load_study(study_name=symbol, storage=storage_name)
+                print(f"\nResuming existing study with {len(study.trials)} trials...")
+            except:
+                print("\nNo existing study found. Starting new study...")
+                study = optuna.create_study(
+                    study_name=symbol,
+                    storage=storage_name,
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(seed=42),
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                )
+        else:
+            print("\nStarting new study...")
+            study = optuna.create_study(
+                study_name=symbol,
+                storage=storage_name,
+                direction='maximize',
+                sampler=optuna.samplers.TPESampler(seed=42),
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+            )
+        
+        # Calculate remaining trials
+        completed_trials = len(study.trials)
+        remaining_trials = max(0, OPTIMIZATION_TRIALS - completed_trials)
+        
+        if remaining_trials > 0:
+            print(f"\nRunning {remaining_trials} remaining trials...")
+            study.optimize(objective, n_trials=remaining_trials, show_progress_bar=True)
+        else:
+            print("\nAll trials completed!")
         
         # Get best parameters
         best_params = study.best_params
@@ -564,6 +707,10 @@ if __name__ == "__main__":
             best_params['min_predicted_move'],
             window_size,
             retrain_interval,
+            best_params['partial_take_profit'],
+            best_params['min_holding_period'],
+            best_params['max_holding_period'],
+            best_params['max_concurrent_trades'],
             feature_cols,
             target_cols
         )
@@ -585,6 +732,10 @@ if __name__ == "__main__":
             'retrain_fraction': best_params['retrain_fraction'],
             'window_size': window_size,
             'retrain_interval': retrain_interval,
+            'partial_take_profit': best_params['partial_take_profit'],
+            'min_holding_period': best_params['min_holding_period'],
+            'max_holding_period': best_params['max_holding_period'],
+            'max_concurrent_trades': best_params['max_concurrent_trades'],
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
             'sharpe_ratio': best_metrics['sharpe_ratio'],
@@ -609,6 +760,10 @@ if __name__ == "__main__":
     print(f"Min Predicted Move: {best_params['min_predicted_move']:.3f}")
     print(f"Window Size: {best_params['window_size']}")
     print(f"Retrain Interval: {best_params['retrain_interval']}")
+    print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")
+    print(f"Min Holding Period: {best_params['min_holding_period']}")
+    print(f"Max Holding Period: {best_params['max_holding_period']}")
+    print(f"Max Concurrent Trades: {best_params['max_concurrent_trades']}")
     print(f"\nPerformance Metrics:")
     print(f"Total Return: {best_params['total_return']:.2f}%")
     print(f"Final Capital: ${best_params['final_capital']:,.2f}")
@@ -666,39 +821,3 @@ if __name__ == "__main__":
     print("\nResults saved to DB/parameter_optimization_results.csv")
     print("Best trade history saved to DB/best_parameter_trade_history.csv")
 
-    # Save model with symbol-specific name
-    # model_path = f"DB/models/{symbol}_LiveDeployModel.joblib"
-    # joblib.dump({
-    #     'model': model,
-    #     'scaler': scaler,
-    #     'feature_cols': feature_cols,
-    #     'parameters': best_params.to_dict(),
-    #     'metrics': best_metrics
-    # }, model_path)
-    # print(f"\nLive deployment model saved to {model_path}")
-
-    # Save optimized parameters to JSON if optimization was run
-    # if not SKIP_OPTIMIZATION:
-    #     # Create Parameters directory if it doesn't exist
-    #     os.makedirs('Parameters', exist_ok=True)
-        
-    #     # Save parameters to JSON
-    #     params_file = f'Parameters/{symbol}.json'
-    #     params_to_save = {
-    #         'max_risk_percentage': best_params['max_risk_percentage'],
-    #         'risk_scaling_factor': best_params['risk_scaling_factor'],
-    #         'risk_reward_ratio': best_params['risk_reward_ratio'],
-    #         'min_predicted_move': best_params['min_predicted_move'],
-    #         'optimization_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    #         'performance_metrics': {
-    #             'total_return': best_metrics['total_return'],
-    #             'sharpe_ratio': best_metrics['sharpe_ratio'],
-    #             'win_rate': best_metrics['win_rate'],
-    #             'max_drawdown': best_metrics['max_drawdown'],
-    #             'trade_count': best_metrics['trade_count']
-    #         }
-    #     }
-        
-    #     with open(params_file, 'w') as f:
-    #         json.dump(params_to_save, f, indent=4)
-    #     print(f"\nOptimized parameters saved to {params_file}")

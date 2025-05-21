@@ -2,13 +2,18 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import optuna
-from Quant.TradingStrategy import run_strategy, calculate_sharpe_ratio, calculate_max_drawdown
+import sys
+import os
+
+# Add the parent directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from TradingStrategy import run_strategy, calculate_sharpe_ratio, calculate_max_drawdown
 from utils import preprocess_data
 import json
 from datetime import datetime
-import os
 import multiprocessing as mp
 from functools import partial
+from utils import clamp
 
 
 # FAPT (Feature-Aggregation Parameter Tuning)
@@ -23,8 +28,10 @@ from functools import partial
 
 
 
-STEP_SIZE = 1000
-N_TRIALS_PER_STUDY = 500
+STEP_SIZE = 310
+N_TRIALS_PER_STUDY = 200
+MIN_WINDOW = 300
+MAX_WINDOW = 20000
 
 symbol = "TSLA"
 data_path = f"DB/{symbol}_15min_indicators.csv"
@@ -35,7 +42,7 @@ def load_best_overall_window(symbol):
         data = json.load(f)
     return data['top_parameters'][0]['parameters']['calculated_window_size']
 
-WINDOW_SIZE = load_best_overall_window(symbol)
+WINDOW_SIZE = 2350 #load_best_overall_window(symbol)
 
 def calculate_distribution_metrics(series):
     """Calculate distribution metrics for a series"""
@@ -43,11 +50,68 @@ def calculate_distribution_metrics(series):
         return None
     
     try:
+        # Calculate basic statistics
+        mean = series.mean()
+        std = series.std()
+        skew = stats.skew(series)
+        kurtosis = stats.kurtosis(series)
+        median = series.median()
+        
+        # Calculate VaR (5%)
+        var_95 = np.percentile(series, 5)
+        
+        # Calculate autocorrelation lag-1
+        autocorr = series.autocorr(lag=1)
+        
+        # Calculate trend slope using linear regression
+        x = np.arange(len(series))
+        slope, _, _, _, _ = stats.linregress(x, series)
+        
+        # Calculate entropy
+        # Discretize the series into 10 bins
+        hist, bin_edges = np.histogram(series, bins=10, density=True)
+        # Calculate PMF (Probability Mass Function)
+        pmf = hist * np.diff(bin_edges)
+        # Calculate entropy
+        entropy = stats.entropy(pmf)
+        
+        # Calculate Hurst Exponent
+        # Using R/S (Rescaled Range) method
+        lags = range(2, len(series)//2)
+        tau = []; laggedvar = []
+        
+        for lag in lags:
+            # Calculate price changes
+            price_changes = series.diff(lag).dropna()
+            # Calculate variance of price changes
+            var = price_changes.var()
+            # Only include non-zero variances
+            if var > 0:
+                laggedvar.append(var)
+                tau.append(lag)
+        
+        # Only calculate Hurst if we have enough valid points
+        if len(tau) > 1 and len(laggedvar) > 1:
+            try:
+                # Linear fit to double-log graph (log(tau) vs log(var))
+                m = np.polyfit(np.log(tau), np.log(laggedvar), 1)
+                hurst = m[0] / 2.0  # Hurst exponent is slope/2
+            except:
+                hurst = 0.5  # Default to random walk if calculation fails
+        else:
+            hurst = 0.5  # Default to random walk if not enough data points
+        
         return {
-            'mean': series.mean(),
-            'std': series.std(),
-            'skew': stats.skew(series),
-            'kurtosis': stats.kurtosis(series)
+            'mean': mean,
+            'std': std,
+            'skew': skew,
+            'kurtosis': kurtosis,
+            'median': median,
+            'var_95': var_95,
+            'autocorr_lag1': autocorr,
+            'trend_slope': slope,
+            'entropy': entropy,
+            'hurst': hurst
         }
     except:
         return None
@@ -75,8 +139,14 @@ def optimize_parameters(df_window, feature_cols, target_cols, n_trials=N_TRIALS_
         scaling_factor = trial.suggest_float('risk_scaling_factor', 1.5, 3.0)
         reward_ratio = trial.suggest_float('risk_reward_ratio', 1.5, 3.0)
         min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
-        window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5)
-        retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1)
+        window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5) # 1% to 50% of the data
+        retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
+        window_size = clamp(int(len(df_window) * window_fraction), MIN_WINDOW, MAX_WINDOW)
+        retrain_interval = max(int(window_size * retrain_fraction), 10)
+        partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
+        min_holding_period = trial.suggest_int('min_holding_period', 5, 20)
+        max_holding_period = trial.suggest_int('max_holding_period', min_holding_period, 40)
+        max_concurrent_trades = trial.suggest_int('max_concurrent_trades', 1, 10)
         
         internal_window_size = int(len(df_window) * window_fraction)
         retrain_interval = max(int(internal_window_size * retrain_fraction), 10)
@@ -84,6 +154,7 @@ def optimize_parameters(df_window, feature_cols, target_cols, n_trials=N_TRIALS_
         # Run strategy with current parameters
         metrics = run_strategy(df_window, min_risk, max_risk, scaling_factor, 
                              reward_ratio, min_predicted_move, internal_window_size, retrain_interval,
+                             partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades,
                              feature_cols, target_cols)
         
         if metrics['trade_count'] == 0:
