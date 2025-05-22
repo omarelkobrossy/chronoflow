@@ -7,8 +7,8 @@ import os
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from TradingStrategy import run_strategy, calculate_sharpe_ratio, calculate_max_drawdown
-from utils import preprocess_data
+from TradingStrategy import run_strategy
+from utils import preprocess_data, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, analyze_window_features
 import json
 from datetime import datetime
 import multiprocessing as mp
@@ -25,16 +25,13 @@ from utils import clamp
 # Total Bayesian Optimization trials = N_TRIALS_PER_STUDY * total_number_of_windows
 # It is recommended to run this script using all the cores of the machine since it is a CPU intensive task
 
-
-
-
 STEP_SIZE = 310
 N_TRIALS_PER_STUDY = 200
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
-
 symbol = "TSLA"
 data_path = f"DB/{symbol}_15min_indicators.csv"
+WINDOW_SIZE = 2350 #load_best_overall_window(symbol)
 
 
 def load_best_overall_window(symbol):
@@ -42,93 +39,7 @@ def load_best_overall_window(symbol):
         data = json.load(f)
     return data['top_parameters'][0]['parameters']['calculated_window_size']
 
-WINDOW_SIZE = 2350 #load_best_overall_window(symbol)
 
-def calculate_distribution_metrics(series):
-    """Calculate distribution metrics for a series"""
-    if series.nunique() <= 2:  # Skip binary or constant features
-        return None
-    
-    try:
-        # Calculate basic statistics
-        mean = series.mean()
-        std = series.std()
-        skew = stats.skew(series)
-        kurtosis = stats.kurtosis(series)
-        median = series.median()
-        
-        # Calculate VaR (5%)
-        var_95 = np.percentile(series, 5)
-        
-        # Calculate autocorrelation lag-1
-        autocorr = series.autocorr(lag=1)
-        
-        # Calculate trend slope using linear regression
-        x = np.arange(len(series))
-        slope, _, _, _, _ = stats.linregress(x, series)
-        
-        # Calculate entropy
-        # Discretize the series into 10 bins
-        hist, bin_edges = np.histogram(series, bins=10, density=True)
-        # Calculate PMF (Probability Mass Function)
-        pmf = hist * np.diff(bin_edges)
-        # Calculate entropy
-        entropy = stats.entropy(pmf)
-        
-        # Calculate Hurst Exponent
-        # Using R/S (Rescaled Range) method
-        lags = range(2, len(series)//2)
-        tau = []; laggedvar = []
-        
-        for lag in lags:
-            # Calculate price changes
-            price_changes = series.diff(lag).dropna()
-            # Calculate variance of price changes
-            var = price_changes.var()
-            # Only include non-zero variances
-            if var > 0:
-                laggedvar.append(var)
-                tau.append(lag)
-        
-        # Only calculate Hurst if we have enough valid points
-        if len(tau) > 1 and len(laggedvar) > 1:
-            try:
-                # Linear fit to double-log graph (log(tau) vs log(var))
-                m = np.polyfit(np.log(tau), np.log(laggedvar), 1)
-                hurst = m[0] / 2.0  # Hurst exponent is slope/2
-            except:
-                hurst = 0.5  # Default to random walk if calculation fails
-        else:
-            hurst = 0.5  # Default to random walk if not enough data points
-        
-        return {
-            'mean': mean,
-            'std': std,
-            'skew': skew,
-            'kurtosis': kurtosis,
-            'median': median,
-            'var_95': var_95,
-            'autocorr_lag1': autocorr,
-            'trend_slope': slope,
-            'entropy': entropy,
-            'hurst': hurst
-        }
-    except:
-        return None
-
-def analyze_window_features(df_window):
-    """Analyze features in a window and return distribution metrics"""
-    feature_metrics = {}
-    
-    # Get numerical columns
-    numerical_cols = df_window.select_dtypes(include=[np.number]).columns
-    
-    for col in numerical_cols:
-        metrics = calculate_distribution_metrics(df_window[col])
-        if metrics is not None:
-            feature_metrics[col] = metrics
-    
-    return feature_metrics
 
 def optimize_parameters(df_window, feature_cols, target_cols, n_trials=N_TRIALS_PER_STUDY):
     """Run Bayesian optimization for a window"""
@@ -216,6 +127,7 @@ def main():
     # Load data
     print(f"Loading data from {data_path}...")
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
+    # df = df.iloc[-5000:]
     
     # Convert date column if needed
     if 'Unnamed: 0' in df.columns:
@@ -238,7 +150,7 @@ def main():
         window_data.append((window_df, i//STEP_SIZE, total_windows, feature_cols, target_cols))
     
     # Determine number of processes to use
-    num_processes = max(1, mp.cpu_count() - 1)  # Leave one core free
+    num_processes = 9#max(1, mp.cpu_count() - 1)  # Leave one core free
     print(f"Using {num_processes} processes for parallel optimization")
     
     # Process windows in parallel
@@ -261,4 +173,5 @@ def main():
     print("\nAnalysis complete! Results saved to Parameters directory.")
 
 if __name__ == "__main__":
+
     main()

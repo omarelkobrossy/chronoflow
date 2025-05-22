@@ -134,6 +134,26 @@ def predict_optimal_parameters(current_features: Dict[str, float], symbol: str =
     if not parameters:
         print("Warning: No parameters found in the best window. Window structure:", json.dumps(best_window, indent=2))
     
+    # Ensure all required parameters are present with default values if missing
+    required_parameters = {
+        'min_risk_percentage': 0.005,
+        'max_risk_percentage': 0.02,
+        'risk_scaling_factor': 1.5,
+        'risk_reward_ratio': 1.5,
+        'min_predicted_move': 0.005,
+        'partial_take_profit': 0.7,
+        'min_holding_period': 5,
+        'max_holding_period': 20,
+        'max_concurrent_trades': 1,
+        'window_fraction': 0.01,
+        'retrain_fraction': 0.05
+    }
+    
+    # Update parameters with any missing values from defaults
+    for param, default_value in required_parameters.items():
+        if param not in parameters:
+            parameters[param] = default_value
+    
     # Return the parameters from the best matching window
     return {
         'parameters': parameters,

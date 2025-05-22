@@ -13,6 +13,7 @@ import os
 from tqdm import tqdm
 import shap # Import SHAP
 import json
+from scipy import stats
 
 # Define model parameters for feature selection
 model_params = {
@@ -237,3 +238,123 @@ def calculate_feature_importance(df, feature_cols, target_cols, iterations=1, sa
 
 def clamp(value, min_value, max_value):
     return max(min_value, min(value, max_value))
+
+def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
+    """Calculate Sharpe ratio from returns series"""
+    excess_returns = returns - risk_free_rate
+    return np.sqrt(252) * excess_returns.mean() / (excess_returns.std() + 1e-8)
+
+def calculate_max_drawdown(equity_curve):
+    """Calculate maximum drawdown from equity curve"""
+    rolling_max = equity_curve.expanding().max()
+    drawdowns = equity_curve / rolling_max - 1
+    return drawdowns.min()
+
+def calculate_dynamic_slippage(entry_price):
+    """Calculate slippage based on capital using logarithmic scaling"""
+    min_slippage = 0.0001  # 0.01%
+    max_slippage = 0.001   # 0.1%
+    max_capital = 100000   # 100k
+    
+    # Use log scaling to calculate slippage
+    # When capital = 0, slippage = min_slippage
+    # When capital = max_capital, slippage = max_slippage
+    # In between, it scales logarithmically
+    if entry_price <= 0:
+        return min_slippage
+    
+    # Calculate the log factor
+    log_factor = np.log1p(entry_price) / np.log1p(max_capital)
+    
+    # Calculate the slippage
+    slippage = min_slippage + (max_slippage - min_slippage) * log_factor
+    
+    return min(slippage, max_slippage)
+
+def calculate_distribution_metrics(series):
+    """Calculate distribution metrics for a series"""
+    if series.nunique() <= 2:  # Skip binary or constant features
+        return None
+    
+    try:
+        # Calculate basic statistics
+        mean = series.mean()
+        std = series.std()
+        skew = stats.skew(series)
+        kurtosis = stats.kurtosis(series)
+        median = series.median()
+        
+        # Calculate VaR (5%)
+        var_95 = np.percentile(series, 5)
+        
+        # Calculate autocorrelation lag-1
+        autocorr = series.autocorr(lag=1)
+        
+        # Calculate trend slope using linear regression
+        x = np.arange(len(series))
+        slope, _, _, _, _ = stats.linregress(x, series)
+        
+        # Calculate entropy
+        # Discretize the series into 10 bins
+        hist, bin_edges = np.histogram(series, bins=10, density=True)
+        # Calculate PMF (Probability Mass Function)
+        pmf = hist * np.diff(bin_edges)
+        # Calculate entropy
+        entropy = stats.entropy(pmf)
+        
+        # Calculate Hurst Exponent
+        # Using R/S (Rescaled Range) method
+        lags = range(2, len(series)//2)
+        tau = []; laggedvar = []
+        
+        for lag in lags:
+            # Calculate price changes
+            price_changes = series.diff(lag).dropna()
+            # Calculate variance of price changes
+            var = price_changes.var()
+            # Only include non-zero variances
+            if var > 0:
+                laggedvar.append(var)
+                tau.append(lag)
+        
+        # Only calculate Hurst if we have enough valid points
+        if len(tau) > 1 and len(laggedvar) > 1:
+            try:
+                # Linear fit to double-log graph (log(tau) vs log(var))
+                m = np.polyfit(np.log(tau), np.log(laggedvar), 1)
+                hurst = m[0] / 2.0  # Hurst exponent is slope/2
+            except:
+                hurst = 0.5  # Default to random walk if calculation fails
+        else:
+            hurst = 0.5  # Default to random walk if not enough data points
+        
+        result = {
+            'mean': mean,
+            'std': std,
+            'skew': skew,
+            'kurtosis': kurtosis,
+            'median': median,
+            'var95': var_95,
+            'autocorr_lag1': autocorr,
+            'trend_slope': slope,
+            'entropy': entropy,
+            'hurst': hurst
+        }
+        return result
+
+    except:
+        return None
+    
+def analyze_window_features(df_window):
+    """Analyze features in a window and return distribution metrics"""
+    feature_metrics = {}
+    
+    # Get numerical columns
+    numerical_cols = df_window.select_dtypes(include=[np.number]).columns
+    
+    for col in numerical_cols:
+        metrics = calculate_distribution_metrics(df_window[col])
+        if metrics is not None:
+            feature_metrics[col] = metrics
+    
+    return feature_metrics

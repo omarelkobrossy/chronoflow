@@ -44,10 +44,10 @@ def extract_feature_metrics(results):
                 window_features = {}
                 for feature, metrics in window_result['feature_metrics'].items():
                     # Store all metrics for each feature
-                    window_features[f"{feature}_mean"] = metrics['mean']
-                    window_features[f"{feature}_std"] = metrics['std']
-                    window_features[f"{feature}_skew"] = metrics['skew']
-                    window_features[f"{feature}_kurtosis"] = metrics['kurtosis']
+                    keys = list(metrics.keys())
+                    for key in keys:
+                        window_features[f"{feature}_{key}"] = metrics[key]
+                
                 
                 feature_data.append(window_features)
                 performance_data.append(perf_metrics)

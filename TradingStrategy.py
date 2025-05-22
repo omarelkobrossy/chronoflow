@@ -6,11 +6,11 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import optuna
 import json
-from utils import preprocess_data, calculate_feature_importance, clamp
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
-# from Optimization.FAPT_Optimization import calculate_distribution_metrics
+
 import scipy.stats
 
 
@@ -37,7 +37,7 @@ TRANSACTION_FEE = 1.0
 
 # Flag to skip optimization
 SKIP_OPTIMIZATION = False  # Set to True to use default parameters
-USE_FAPT = False
+USE_FAPT = True
 OPTIMIZATION_TRIALS = 350
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
@@ -45,49 +45,19 @@ MIN_WINDOW = 300
 MAX_WINDOW = 20000
 
 if USE_FAPT:
-    stat_suffix = ['_mean', '_std', '_skew', '_kurtosis']
+
     SKIP_OPTIMIZATION = True
     global_market_weather_features = get_top_market_weather_features(symbol)
     market_weather_features = {}
     for feature in global_market_weather_features:
-        base_feature = feature.split('_mean')[0] if '_mean' in feature else feature.split('_std')[0] if '_std' in feature else feature.split('_skew')[0] if '_skew' in feature else feature.split('_kurtosis')[0]
+        base_feature = "_".join(feature.split('_')[:-1])  # Get the base feature name without the metric suffix
         if base_feature not in market_weather_features:
             market_weather_features[base_feature] = []
-        stat_type = feature.split(base_feature + '_')[1] if '_' in feature else 'mean'
+        stat_type = feature.split('_')[-1]  # Get the metric suffix (e.g., 'mean', 'std', etc.)
         market_weather_features[base_feature].append(stat_type)
 
 
-def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
-    """Calculate Sharpe ratio from returns series"""
-    excess_returns = returns - risk_free_rate
-    return np.sqrt(252) * excess_returns.mean() / (excess_returns.std() + 1e-8)
 
-def calculate_max_drawdown(equity_curve):
-    """Calculate maximum drawdown from equity curve"""
-    rolling_max = equity_curve.expanding().max()
-    drawdowns = equity_curve / rolling_max - 1
-    return drawdowns.min()
-
-def calculate_dynamic_slippage(entry_price):
-    """Calculate slippage based on capital using logarithmic scaling"""
-    min_slippage = 0.0001  # 0.01%
-    max_slippage = 0.001   # 0.1%
-    max_capital = 100000   # 100k
-    
-    # Use log scaling to calculate slippage
-    # When capital = 0, slippage = min_slippage
-    # When capital = max_capital, slippage = max_slippage
-    # In between, it scales logarithmically
-    if entry_price <= 0:
-        return min_slippage
-    
-    # Calculate the log factor
-    log_factor = np.log1p(entry_price) / np.log1p(max_capital)
-    
-    # Calculate the slippage
-    slippage = min_slippage + (max_slippage - min_slippage) * log_factor
-    
-    return min(slippage, max_slippage)
 
 def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols):
     """Run trading strategy with given parameters"""
@@ -218,19 +188,14 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 feature_series = pd.Series(current_holdout[feature].values)
                 if feature_series.nunique() <= 2:  # Skip binary or constant features
                     continue
-                    
-                for stat_type in stat_types:
-                    try:
-                        if stat_type == 'mean':
-                            current_feature_metrics[f"{feature}_mean"] = feature_series.mean()
-                        elif stat_type == 'std':
-                            current_feature_metrics[f"{feature}_std"] = feature_series.std()
-                        elif stat_type == 'skew':
-                            current_feature_metrics[f"{feature}_skew"] = scipy.stats.skew(feature_series)
-                        elif stat_type == 'kurtosis':
-                            current_feature_metrics[f"{feature}_kurtosis"] = scipy.stats.kurtosis(feature_series)
-                    except:
-                        continue
+                
+                # Get all metrics for this feature using calculate_distribution_metrics
+                metrics = calculate_distribution_metrics(feature_series)
+                if metrics is not None:
+                    # Only keep the metrics that are in our stat_types list
+                    for stat_type in stat_types:
+                        if stat_type in metrics:
+                            current_feature_metrics[f"{feature}_{stat_type}"] = metrics[stat_type]
             
             # Get optimal parameters from FAPT
             fapt_params = predict_optimal_parameters(current_feature_metrics, symbol)
@@ -576,9 +541,9 @@ if __name__ == "__main__":
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     # Filter data by time range
-    start_date = '2015-04-01'  # Format: 'YYYY-MM-DD'
-    end_date = '2019-03-01'    # Format: 'YYYY-MM-DD'
-    df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+    # start_date = '2015-04-01'  # Format: 'YYYY-MM-DD'
+    # end_date = '2019-03-01'    # Format: 'YYYY-MM-DD'
+    # df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
     
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:
