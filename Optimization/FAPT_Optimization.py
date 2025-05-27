@@ -4,6 +4,7 @@ from scipy import stats
 import optuna
 import sys
 import os
+import argparse
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,7 +79,7 @@ def optimize_parameters(df_window, feature_cols, target_cols, n_trials=N_TRIALS_
         trial.set_user_attr('max_drawdown', metrics['max_drawdown'])
         trial.set_user_attr('trade_count', metrics['trade_count'])
         
-        return metrics['sharpe_ratio']
+        return -abs(metrics['max_drawdown'])
 
     # Create and run optimization study
     study = optuna.create_study(direction='maximize')
@@ -123,11 +124,38 @@ def process_window(window_data):
         'performance_metrics': optimization_results['metrics']
     }
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run FAPT optimization with optional data subsetting')
+    parser.add_argument('--start', type=int, help='Start index for data subsetting')
+    parser.add_argument('--end', type=int, help='End index for data subsetting')
+    return parser.parse_args()
+
 def main():
+    # Parse command line arguments
+    args = parse_args()
+    
     # Load data
     print(f"Loading data from {data_path}...")
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
-    # df = df.iloc[-5000:]
+
+    # Subset data if start and end indices are provided
+    if args.start is not None or args.end is not None:
+        start_idx = args.start if args.start is not None else 0
+        end_idx = args.end if args.end is not None else len(df)
+        
+        # Validate indices
+        if start_idx < 0:
+            print("Warning: Start index is negative, using 0 instead")
+            start_idx = 0
+        if end_idx > len(df):
+            print(f"Warning: End index exceeds data length ({len(df)}), using data length instead")
+            end_idx = len(df)
+        if start_idx >= end_idx:
+            raise ValueError("Start index must be less than end index")
+            
+        print(f"Subsetting data from index {start_idx} to {end_idx}")
+        df = df.iloc[start_idx:end_idx]
+        print(f"Subset data length: {len(df)}")
     
     # Convert date column if needed
     if 'Unnamed: 0' in df.columns:
@@ -137,6 +165,7 @@ def main():
         df['Date'] = pd.to_datetime(df['Date'])
     
     df = df.sort_values('Date').reset_index(drop=True)
+    
     
     # Prepare window data for parallel processing
     total_windows = (len(df) - WINDOW_SIZE) // STEP_SIZE + 1
@@ -150,7 +179,7 @@ def main():
         window_data.append((window_df, i//STEP_SIZE, total_windows, feature_cols, target_cols))
     
     # Determine number of processes to use
-    num_processes = 9#max(1, mp.cpu_count() - 1)  # Leave one core free
+    num_processes = max(1, mp.cpu_count())
     print(f"Using {num_processes} processes for parallel optimization")
     
     # Process windows in parallel
@@ -163,6 +192,11 @@ def main():
         'window_size': WINDOW_SIZE,
         'step_size': STEP_SIZE,
         'analysis_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'data_subset': {
+            'start_index': args.start,
+            'end_index': args.end,
+            'subset_length': len(df)
+        },
         'results': results
     }
     
@@ -173,5 +207,4 @@ def main():
     print("\nAnalysis complete! Results saved to Parameters directory.")
 
 if __name__ == "__main__":
-
     main()

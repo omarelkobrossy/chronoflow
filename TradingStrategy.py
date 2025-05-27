@@ -37,7 +37,7 @@ TRANSACTION_FEE = 1.0
 
 # Flag to skip optimization
 SKIP_OPTIMIZATION = False  # Set to True to use default parameters
-USE_FAPT = True
+USE_FAPT = False
 OPTIMIZATION_TRIALS = 350
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
@@ -501,7 +501,7 @@ def objective(trial):
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
-        return -1000.0
+        return 100.0  # Return a high drawdown value for no trades
     
     # Store metrics as trial attributes
     trial.set_user_attr('total_return', metrics['total_return'])

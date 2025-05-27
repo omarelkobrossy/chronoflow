@@ -275,15 +275,32 @@ def calculate_distribution_metrics(series):
     """Calculate distribution metrics for a series"""
     if series.nunique() <= 2:  # Skip binary or constant features
         return None
-    
+
     try:
-        # Calculate basic statistics
         mean = series.mean()
         std = series.std()
         skew = stats.skew(series)
         kurtosis = stats.kurtosis(series)
         median = series.median()
-        
+        min_ = series.min()
+        max_ = series.max()
+
+        # 1. Scale-free location
+        scale_free_location = (mean - min_) / (max_ - min_) if max_ != min_ else 0
+
+        # 2. Signal-to-noise ratio
+        signal_to_noise = mean / std if std != 0 else 0
+
+        # 3. Robust center deviation
+        robust_center = mean / median if median != 0 else 0
+
+        # 4. Drift across bars (mean of log returns)
+        if (series > 0).all():
+            log_returns = np.log(series).diff().dropna()
+            mean_log_returns = log_returns.mean()
+        else:
+            mean_log_returns = np.nan  # Not defined for non-positive values
+
         # Calculate VaR (5%)
         var_95 = np.percentile(series, 5)
         
@@ -328,6 +345,8 @@ def calculate_distribution_metrics(series):
         else:
             hurst = 0.5  # Default to random walk if not enough data points
         
+        # In the result object, don't put underscores in the keys since in another function 
+        # we split the result key from the feature's name by '_'
         result = {
             'mean': mean,
             'std': std,
@@ -335,14 +354,18 @@ def calculate_distribution_metrics(series):
             'kurtosis': kurtosis,
             'median': median,
             'var95': var_95,
-            'autocorr_lag1': autocorr,
-            'trend_slope': slope,
+            'autocorrLag1': autocorr,
+            'trendSlope': slope,
             'entropy': entropy,
-            'hurst': hurst
+            'hurst': hurst,
+            'scaleFreeLocation': scale_free_location,
+            'signalToNoise': signal_to_noise,
+            'robustCenter': robust_center,
+            'meanLogReturns': mean_log_returns,
         }
         return result
 
-    except:
+    except Exception as e:
         return None
     
 def analyze_window_features(df_window):
