@@ -5,16 +5,16 @@ import optuna
 import sys
 import os
 import argparse
-
-# Add the parent directory to the Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from TradingStrategy import run_strategy
-from utils import preprocess_data, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, analyze_window_features
+import boto3
 import json
 from datetime import datetime
 import multiprocessing as mp
 from functools import partial
-from utils import clamp
+
+# Add the parent directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from TradingStrategy import run_strategy
+from utils import clamp, preprocess_data, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, analyze_window_features
 
 
 # FAPT (Feature-Aggregation Parameter Tuning)
@@ -27,7 +27,7 @@ from utils import clamp
 # It is recommended to run this script using all the cores of the machine since it is a CPU intensive task
 
 STEP_SIZE = 310
-N_TRIALS_PER_STUDY = 200
+N_TRIALS_PER_STUDY = 500
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
 symbol = "TSLA"
@@ -128,7 +128,25 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Run FAPT optimization with optional data subsetting')
     parser.add_argument('--start', type=int, help='Start index for data subsetting')
     parser.add_argument('--end', type=int, help='End index for data subsetting')
+    parser.add_argument('--s3', action='store_true', help='Save results to S3 bucket')
     return parser.parse_args()
+
+def save_to_s3(data, symbol, start_idx, end_idx):
+    """Save results to S3 bucket"""
+    s3 = boto3.client('s3')
+    bucket_name = 'fapt-optimization-results'
+    # Store in symbol-specific folder
+    key = f"{symbol}/{symbol}_{start_idx}_{end_idx}.json"
+    
+    try:
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=json.dumps(data, indent=4)
+        )
+        print(f"Successfully saved results to s3://{bucket_name}/{key}")
+    except Exception as e:
+        print(f"Error saving to S3: {str(e)}")
 
 def main():
     # Parse command line arguments
@@ -179,7 +197,7 @@ def main():
         window_data.append((window_df, i//STEP_SIZE, total_windows, feature_cols, target_cols))
     
     # Determine number of processes to use
-    num_processes = max(1, mp.cpu_count())
+    num_processes = max(1, mp.cpu_count()) - 1
     print(f"Using {num_processes} processes for parallel optimization")
     
     # Process windows in parallel
@@ -200,9 +218,14 @@ def main():
         'results': results
     }
     
+    # Save locally
     os.makedirs('Parameters', exist_ok=True)
     with open(f'Parameters/{symbol}_Aggregated_Optimization.json', 'w') as f:
         json.dump(final_results, f, indent=4)
+    
+    # Save to S3 if flag is set
+    if args.s3:
+        save_to_s3(final_results, symbol, args.start, args.end)
     
     print("\nAnalysis complete! Results saved to Parameters directory.")
 
