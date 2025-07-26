@@ -361,7 +361,8 @@ def calculate_distribution_metrics(series):
             'scaleFreeLocation': scale_free_location,
             'signalToNoise': signal_to_noise,
             'robustCenter': robust_center,
-            'meanLogReturns': mean_log_returns,
+            #Removed meanLogReturns because it's not working as intended, Needs work
+            #'meanLogReturns': mean_log_returns,
         }
         return result
 

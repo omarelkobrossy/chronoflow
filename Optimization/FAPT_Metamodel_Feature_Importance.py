@@ -5,6 +5,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
+import joblib
 
 
 # FAPT_Metamodel_Feature_Importance
@@ -16,7 +18,7 @@ import seaborn as sns
 
 
 symbol = "TSLA"
-N_FEATURES_TO_SELECT = 40
+N_FEATURES_TO_SELECT = 20
 
 def load_optimization_results(symbol):
     """Load and process optimization results"""
@@ -78,10 +80,10 @@ def train_metamodel(feature_df, performance_df):
         'importance': model.feature_importances_
     })
     
-    return model, feature_importance
+    return model, scaler, feature_importance
 
-def plot_feature_importance(feature_importance):
-    """Plot top 20 features by importance"""
+def plot_feature_importance(feature_importance, model, scaler, feature_df, performance_df):
+    """Plot top 20 features by importance and save model artifacts"""
     plt.figure(figsize=(15, 8))
     top_features = feature_importance.nlargest(N_FEATURES_TO_SELECT, 'importance')
     sns.barplot(data=top_features, x='importance', y='feature')
@@ -90,6 +92,38 @@ def plot_feature_importance(feature_importance):
     plt.tight_layout()
     plt.savefig(f'Optimization/{symbol}_feature_importance.png')
     plt.close()
+    
+    # Save selected features to JSON
+    selected_features = {
+        "selected_features": top_features['feature'].tolist(),
+        "n_features": len(top_features)
+    }
+    
+    # Create models directory if it doesn't exist
+    os.makedirs('Optimization/models', exist_ok=True)
+    
+    # Save to JSON file
+    with open(f'Optimization/models/{symbol}_selected_features.json', 'w') as f:
+        json.dump(selected_features, f, indent=4)
+    
+    # Train final model using only selected features
+    print("\nTraining final model with selected features...")
+    X_selected = feature_df[top_features['feature'].tolist()]
+    y = performance_df['sharpe_ratio']
+    
+    # Create and fit new scaler on selected features
+    final_scaler = StandardScaler()
+    X_selected_scaled = final_scaler.fit_transform(X_selected)
+    
+    # Train final model
+    final_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    final_model.fit(X_selected_scaled, y)
+    
+    # Save final model and scaler
+    joblib.dump(final_model, f'Optimization/models/{symbol}_metamodel.joblib')
+    joblib.dump(final_scaler, f'Optimization/models/{symbol}_scaler.joblib')
+    
+    return selected_features
 
 def main():
     # Load results
@@ -102,17 +136,20 @@ def main():
     
     # Train model
     print("Training metamodel...")
-    model, feature_importance = train_metamodel(feature_df, performance_df)
+    model, scaler, feature_importance = train_metamodel(feature_df, performance_df)
     
     # Display results
     print(f"\nTop {N_FEATURES_TO_SELECT} Features by Importance:")
     top_features = feature_importance.nlargest(N_FEATURES_TO_SELECT, 'importance')
     print(top_features.to_string(index=False))
     
-    # Plot results
+    # Plot results and save selected features
     print("\nGenerating feature importance plot...")
-    plot_feature_importance(feature_importance)
+    selected_features = plot_feature_importance(feature_importance, model, scaler, feature_df, performance_df)
     print(f"Plot saved as 'Optimization/{symbol}_feature_importance.png'")
+    print(f"Selected features saved to 'Optimization/models/{symbol}_selected_features.json'")
+    print(f"Final model saved to 'Optimization/models/{symbol}_metamodel.joblib'")
+    print(f"Final scaler saved to 'Optimization/models/{symbol}_scaler.joblib'")
 
 if __name__ == "__main__":
     main()

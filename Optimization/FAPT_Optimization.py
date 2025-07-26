@@ -11,11 +11,15 @@ from datetime import datetime
 import multiprocessing as mp
 from functools import partial
 
+
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from TradingStrategy import run_strategy
 from utils import clamp, preprocess_data, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, analyze_window_features
 
+# Redirect stdout and stderr to /dev/null
+sys.stdout = open(os.devnull, 'w')
+sys.stderr = open(os.devnull, 'w')
 
 # FAPT (Feature-Aggregation Parameter Tuning)
 # This script performs a Bayesian optimization of the parameters for the trading strategy
@@ -26,13 +30,13 @@ from utils import clamp, preprocess_data, calculate_sharpe_ratio, calculate_max_
 # Total Bayesian Optimization trials = N_TRIALS_PER_STUDY * total_number_of_windows
 # It is recommended to run this script using all the cores of the machine since it is a CPU intensive task
 
-STEP_SIZE = 310
+STEP_SIZE = 12500 #310
 N_TRIALS_PER_STUDY = 500
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
 symbol = "TSLA"
 data_path = f"DB/{symbol}_15min_indicators.csv"
-WINDOW_SIZE = 2350 #load_best_overall_window(symbol)
+WINDOW_SIZE = 12500 #2350 #load_best_overall_window(symbol)
 
 
 def load_best_overall_window(symbol):
@@ -197,7 +201,7 @@ def main():
         window_data.append((window_df, i//STEP_SIZE, total_windows, feature_cols, target_cols))
     
     # Determine number of processes to use
-    num_processes = max(1, mp.cpu_count()) - 1
+    num_processes = max(1, mp.cpu_count())
     print(f"Using {num_processes} processes for parallel optimization")
     
     # Process windows in parallel

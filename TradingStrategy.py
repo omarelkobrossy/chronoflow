@@ -27,19 +27,19 @@ DEFAULT_MAX_HOLDING_PERIOD = 9
 DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
 DEFAULT_MAX_CONCURRENT_TRADES = 3
 DEFAULT_WINDOW_SIZE = 359
-DEFAULT_RETREIN_INTERVAL = 155
+DEFAULT_RETREIN_INTERVAL = 15
 
 # Fixed parameters
-INITIAL_CAPITAL = 1000000
+INITIAL_CAPITAL = 6000
 SLIPPAGE = 0.0005
 TRANSACTION_FEE = 1.0
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = False  # Set to True to use default parameters
+SKIP_OPTIMIZATION = True  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 350
-RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
+OPTIMIZATION_TRIALS = 1200
+RESUME_STUDY = False  # Set to True to resume from previous study, False to start new, None to check if exists
 
 MIN_WINDOW = 300
 MAX_WINDOW = 20000
@@ -123,7 +123,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         total_data_processed += retrain_interval
         
         # Recalculate feature importance every window_size worth of data
-        if total_data_processed >= window_size:
+        if total_data_processed >= retrain_interval:
             print(f"\nRecalculating feature importance at index {start}...")
             feature_selection_data = df_window.iloc[start-window_size:start].copy()
             current_features = calculate_feature_importance(
@@ -187,7 +187,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             for feature, stat_types in market_weather_features.items():
                 feature_series = pd.Series(current_holdout[feature].values)
                 if feature_series.nunique() <= 2:  # Skip binary or constant features
-                    continue
+                   continue
                 
                 # Get all metrics for this feature using calculate_distribution_metrics
                 metrics = calculate_distribution_metrics(feature_series)
@@ -288,6 +288,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         min_risk_percentage * (1 + (predicted_move / min_predicted_move) * risk_scaling_factor),
                         max_risk_percentage
                     )
+                    # scaling_factor = min(1.0, capital / BREAK_EVEN_CAPITAL)  # 0 to 1
+                    # adjusted_risk_pct = risk_percentage / scaling_factor
                     
                     risk_amount = capital * risk_percentage
                     stop_loss = entry_price * (1 - (predicted_move / risk_reward_ratio))
@@ -541,9 +543,9 @@ if __name__ == "__main__":
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     # Filter data by time range
-    # start_date = '2015-04-01'  # Format: 'YYYY-MM-DD'
-    # end_date = '2019-03-01'    # Format: 'YYYY-MM-DD'
-    # df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+    start_date = '2023-04-15'  # Format: 'YYYY-MM-DD'
+    end_date = '2025-04-15'    # Format: 'YYYY-MM-DD'
+    df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
     
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:

@@ -33,6 +33,54 @@ def calculate_technical_indicators(df, market_data=None, timeframe=1):
     rs = gain / loss
     df["RSI_14"] = 100 - (100 / (1 + rs))
     
+    # Calculate Stochastic RSI (using only past data)
+    # Stochastic RSI combines RSI with Stochastic oscillator concepts
+    rsi_min = df["RSI_14"].shift(1).rolling(window=14).min()
+    rsi_max = df["RSI_14"].shift(1).rolling(window=14).max()
+    df["Stoch_RSI_K"] = 100 * (df["RSI_14"].shift(1) - rsi_min) / (rsi_max - rsi_min + 1e-8)
+    df["Stoch_RSI_D"] = df["Stoch_RSI_K"].shift(1).rolling(window=3).mean()
+    
+    # Stochastic RSI overbought/oversold signals
+    df["Stoch_RSI_Overbought"] = (df["Stoch_RSI_K"] > 80).astype(int)
+    df["Stoch_RSI_Oversold"] = (df["Stoch_RSI_K"] < 20).astype(int)
+    
+    # Stochastic RSI divergence signals
+    df["Stoch_RSI_Bullish_Divergence"] = (
+        (df["Stoch_RSI_K"] > df["Stoch_RSI_K"].shift(1)) & 
+        (df["Close"].shift(1) < df["Close"].shift(2))
+    ).astype(int)
+    
+    df["Stoch_RSI_Bearish_Divergence"] = (
+        (df["Stoch_RSI_K"] < df["Stoch_RSI_K"].shift(1)) & 
+        (df["Close"].shift(1) > df["Close"].shift(2))
+    ).astype(int)
+    
+    # Stochastic RSI momentum
+    df["Stoch_RSI_Momentum"] = df["Stoch_RSI_K"] - df["Stoch_RSI_K"].shift(5)
+    df["Stoch_RSI_Acceleration"] = df["Stoch_RSI_Momentum"].diff()
+    
+    # Stochastic RSI trend strength
+    df["Stoch_RSI_Trend_Strength"] = abs(df["Stoch_RSI_K"] - 50) / 50
+    
+    # Stochastic RSI volatility
+    df["Stoch_RSI_Volatility"] = df["Stoch_RSI_K"].shift(1).rolling(window=14).std()
+    
+    # Stochastic RSI mean reversion signals
+    df["Stoch_RSI_Mean_Reversion_Signal"] = (
+        (df["Stoch_RSI_K"] > 80) | (df["Stoch_RSI_K"] < 20)
+    ).astype(int)
+    
+    # Stochastic RSI breakout signals
+    df["Stoch_RSI_Breakout_Up"] = (
+        (df["Stoch_RSI_K"] > df["Stoch_RSI_K"].shift(1)) & 
+        (df["Stoch_RSI_K"].shift(1) < 20)
+    ).astype(int)
+    
+    df["Stoch_RSI_Breakout_Down"] = (
+        (df["Stoch_RSI_K"] < df["Stoch_RSI_K"].shift(1)) & 
+        (df["Stoch_RSI_K"].shift(1) > 80)
+    ).astype(int)
+    
     # Mean Reversion Features
     print("Calculating mean reversion features...")
     
