@@ -14,7 +14,7 @@ from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_ma
 import scipy.stats
 
 
-symbol = "TSLA"
+symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
 DEFAULT_MIN_RISK = 0.006489884911079899
@@ -26,13 +26,13 @@ DEFAULT_MIN_HOLDING_PERIOD = 8
 DEFAULT_MAX_HOLDING_PERIOD = 9
 DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
 DEFAULT_MAX_CONCURRENT_TRADES = 3
-DEFAULT_WINDOW_SIZE = 359
+DEFAULT_WINDOW_SIZE = 200
 DEFAULT_RETREIN_INTERVAL = 15
 
 # Fixed parameters
-INITIAL_CAPITAL = 6000
-SLIPPAGE = 0.0005
-TRANSACTION_FEE = 1.0
+INITIAL_CAPITAL = 100
+SLIPPAGE = 0.001
+TRANSACTION_FEE = 0.0
 
 
 # Flag to skip optimization
@@ -542,10 +542,10 @@ if __name__ == "__main__":
     data_path = f"DB/{symbol}_15min_indicators.csv"
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
-    # Filter data by time range
-    start_date = '2023-04-15'  # Format: 'YYYY-MM-DD'
-    end_date = '2025-04-15'    # Format: 'YYYY-MM-DD'
-    df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+    #Filter data by time range
+    start_date = '2025-01-15'  # Format: 'YYYY-MM-DD'
+    # end_date = '2025-04-15'    # Format: 'YYYY-MM-DD'
+    df = df[(df['Date'] >= start_date)]# & (df['Date'] <= end_date)]
     
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:

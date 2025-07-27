@@ -1,0 +1,265 @@
+{
+    "optimization_date": "2025-07-26 12:13:34",
+    "top_parameters": [
+        {
+            "trial_number": 10,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.015030389719012098,
+                "max_risk_percentage": 0.0217063032609952,
+                "risk_scaling_factor": 2.9543056661817992,
+                "risk_reward_ratio": 2.506903297226576,
+                "min_predicted_move": 0.009892705530888474,
+                "partial_take_profit": 0.8560208817930913,
+                "min_holding_period": 6,
+                "max_holding_period": 6,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.34782138162882426,
+                "retrain_fraction": 0.8892016272074519,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 266
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 11,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.015377320977264063,
+                "max_risk_percentage": 0.022178854990569406,
+                "risk_scaling_factor": 2.868411886432971,
+                "risk_reward_ratio": 2.533211147765425,
+                "min_predicted_move": 0.00984332134292915,
+                "partial_take_profit": 0.8586725177610849,
+                "min_holding_period": 5,
+                "max_holding_period": 8,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.3432898087721443,
+                "retrain_fraction": 0.8949816147276821,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 268
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 12,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.01472042956300221,
+                "max_risk_percentage": 0.0214287834374237,
+                "risk_scaling_factor": 2.9838735444346898,
+                "risk_reward_ratio": 2.374782392160002,
+                "min_predicted_move": 0.009977611306673942,
+                "partial_take_profit": 0.8652139313230717,
+                "min_holding_period": 5,
+                "max_holding_period": 5,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.3950584569034836,
+                "retrain_fraction": 0.9875464443331207,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 296
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 13,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.01495109642917974,
+                "max_risk_percentage": 0.021784414925197254,
+                "risk_scaling_factor": 2.9970119583336925,
+                "risk_reward_ratio": 2.594752244297552,
+                "min_predicted_move": 0.009826689730327277,
+                "partial_take_profit": 0.8577710858847413,
+                "min_holding_period": 5,
+                "max_holding_period": 5,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.49087626192350203,
+                "retrain_fraction": 0.8173420126709103,
+                "calculated_window_size": 353,
+                "calculated_retrain_interval": 288
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 14,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.015219648043587186,
+                "max_risk_percentage": 0.022177713370133374,
+                "risk_scaling_factor": 2.7724993237883893,
+                "risk_reward_ratio": 2.1781825667360755,
+                "min_predicted_move": 0.009051189797924183,
+                "partial_take_profit": 0.9448563979431861,
+                "min_holding_period": 7,
+                "max_holding_period": 11,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.35100394473058316,
+                "retrain_fraction": 0.8119225965168821,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 243
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 15,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.012739220662045345,
+                "max_risk_percentage": 0.018717840175702223,
+                "risk_scaling_factor": 2.4389968872397025,
+                "risk_reward_ratio": 2.8785195930436114,
+                "min_predicted_move": 0.009438872354180713,
+                "partial_take_profit": 0.8550372269461394,
+                "min_holding_period": 7,
+                "max_holding_period": 11,
+                "max_concurrent_trades": 3,
+                "window_fraction": 0.3908035825836253,
+                "retrain_fraction": 0.7114814540772896,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 213
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 20,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.01090183415086053,
+                "max_risk_percentage": 0.01591777501290994,
+                "risk_scaling_factor": 2.9066249893311045,
+                "risk_reward_ratio": 2.0575205732738735,
+                "min_predicted_move": 0.00960526877842316,
+                "partial_take_profit": 0.8290710313397996,
+                "min_holding_period": 6,
+                "max_holding_period": 8,
+                "max_concurrent_trades": 3,
+                "window_fraction": 0.29916784875608315,
+                "retrain_fraction": 0.6998734844008774,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 209
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 21,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.014248997668786002,
+                "max_risk_percentage": 0.020514396907393477,
+                "risk_scaling_factor": 2.9948951683442364,
+                "risk_reward_ratio": 2.4245262539092374,
+                "min_predicted_move": 0.009838400843664987,
+                "partial_take_profit": 0.8719772913752194,
+                "min_holding_period": 5,
+                "max_holding_period": 5,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.39003014329274704,
+                "retrain_fraction": 0.999442819383301,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 299
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 22,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.017194831794879267,
+                "max_risk_percentage": 0.020984307243053404,
+                "risk_scaling_factor": 2.659466750703775,
+                "risk_reward_ratio": 2.3007219851756036,
+                "min_predicted_move": 0.009866319919614088,
+                "partial_take_profit": 0.8742455551715764,
+                "min_holding_period": 8,
+                "max_holding_period": 10,
+                "max_concurrent_trades": 5,
+                "window_fraction": 0.3861988318248416,
+                "retrain_fraction": 0.8928113828568552,
+                "calculated_window_size": 300,
+                "calculated_retrain_interval": 267
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        },
+        {
+            "trial_number": 23,
+            "score": 100.0,
+            "parameters": {
+                "min_risk_percentage": 0.014239287424251188,
+                "max_risk_percentage": 0.02036247188519151,
+                "risk_scaling_factor": 2.8578390190192042,
+                "risk_reward_ratio": 2.5016246453553577,
+                "min_predicted_move": 0.009947720814429606,
+                "partial_take_profit": 0.8447906010502376,
+                "min_holding_period": 6,
+                "max_holding_period": 8,
+                "max_concurrent_trades": 4,
+                "window_fraction": 0.43670911443269866,
+                "retrain_fraction": 0.9318156410759704,
+                "calculated_window_size": 314,
+                "calculated_retrain_interval": 292
+            },
+            "metrics": {
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0
+            }
+        }
+    ]
+}
