@@ -37,8 +37,8 @@ def calculate_technical_indicators(df, market_data=None, timeframe=1):
     # Stochastic RSI combines RSI with Stochastic oscillator concepts
     rsi_min = df["RSI_14"].shift(1).rolling(window=14).min()
     rsi_max = df["RSI_14"].shift(1).rolling(window=14).max()
-    df["Stoch_RSI_K"] = 100 * (df["RSI_14"].shift(1) - rsi_min) / (rsi_max - rsi_min + 1e-8)
-    df["Stoch_RSI_D"] = df["Stoch_RSI_K"].shift(1).rolling(window=3).mean()
+    df["Stoch_RSI_K"] = 3 #100 * (df["RSI_14"].shift(1) - rsi_min) / (rsi_max - rsi_min + 1e-8)
+    df["Stoch_RSI_D"] = 3 #df["Stoch_RSI_K"].shift(1).rolling(window=3).mean()
     
     # Stochastic RSI overbought/oversold signals
     df["Stoch_RSI_Overbought"] = (df["Stoch_RSI_K"] > 80).astype(int)

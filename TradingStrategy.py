@@ -18,7 +18,7 @@ symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
 DEFAULT_MIN_RISK = 0.006489884911079899
-DEFAULT_MAX_RISK = 0.009567915879945087
+DEFAULT_MAX_RISK = 0.109567915879945087
 DEFAULT_SCALING = 1.6949727011806939
 DEFAULT_RR = 1.6037213842177254
 DEFAULT_MIN_PREDICTED_MOVE = 0.005113433706915217
@@ -30,7 +30,7 @@ DEFAULT_WINDOW_SIZE = 200
 DEFAULT_RETREIN_INTERVAL = 15
 
 # Fixed parameters
-INITIAL_CAPITAL = 100
+INITIAL_CAPITAL = 505
 SLIPPAGE = 0.001
 TRANSACTION_FEE = 0.0
 
@@ -38,11 +38,11 @@ TRANSACTION_FEE = 0.0
 # Flag to skip optimization
 SKIP_OPTIMIZATION = True  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 1200
-RESUME_STUDY = False  # Set to True to resume from previous study, False to start new, None to check if exists
+OPTIMIZATION_TRIALS = 600
+RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
-MIN_WINDOW = 300
-MAX_WINDOW = 20000
+MIN_WINDOW = 100#300
+MAX_WINDOW = 5000#20000
 
 if USE_FAPT:
 
@@ -292,8 +292,13 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # adjusted_risk_pct = risk_percentage / scaling_factor
                     
                     risk_amount = capital * risk_percentage
-                    stop_loss = entry_price * (1 - (predicted_move / risk_reward_ratio))
-                    take_profit = entry_price * (1 + predicted_move)
+                    # Calculate stop loss and take profit based on ATR and risk_reward_ratio
+                    # Use ATR for dynamic stop loss calculation
+                    atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
+                    atr_multiplier = 2.0  # Use 2x ATR for stop loss distance
+                    stop_loss_distance = atr_value * atr_multiplier
+                    stop_loss = entry_price - stop_loss_distance
+                    take_profit = entry_price + (stop_loss_distance * risk_reward_ratio)
                     risk_per_share = entry_price - stop_loss
                     
                     if risk_per_share <= 0 or np.isnan(risk_per_share):
@@ -478,8 +483,8 @@ def objective(trial):
     min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
     window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5) # 1% to 50% of the data
     retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
-    window_size = clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = max(int(window_size * retrain_fraction), 10)
+    window_size = 200#clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
+    retrain_interval = 15#max(int(window_size * retrain_fraction), 10)
     partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
     min_holding_period = trial.suggest_int('min_holding_period', 5, 20)
     max_holding_period = trial.suggest_int('max_holding_period', min_holding_period, 40)
@@ -529,7 +534,7 @@ def objective(trial):
     return_weight = 0.4  # 40% weight to total return
     drawdown_weight = 0.2  # 20% weight to minimizing drawdown
     
-    composite_score = -normalized_drawdown
+    composite_score = normalized_return #-normalized_drawdown
     
     # Save top parameters after each trial
     save_top_parameters(study, symbol)
