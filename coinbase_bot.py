@@ -37,6 +37,10 @@ class CoinbaseAPIClient:
         self.model = None
         self.current_features = None
         self.window_size = 200
+        
+        # Incremental statistics for expanding standardization
+        self.running_stats = {}  # Will store {feature: {'sum': x, 'sum_sq': x, 'count': n}}
+        self.last_processed_timestamp = None
         self.retrain_interval = 15  # Number of 15-minute intervals between retrains (15 * 15 = 225 minutes)
         self.last_retrain_idx = 0
         self.last_retrain_time = None
@@ -399,9 +403,25 @@ class CoinbaseAPIClient:
             print(f"Error fetching orders: {e}")
             return None
     
-    def initialize_model(self, df):
+    def initialize_model(self, df=None):
         """Initialize the model with historical data"""
         print("\nInitializing model...")
+        
+        # Load data with historical buffer for proper technical indicator calculation
+        if df is None:
+            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        else:
+            # If df is provided but might not have enough historical context, reload with buffer
+            if len(df) < 500:  # If less than reasonable buffer, reload
+                print("Provided DataFrame too small, loading with historical buffer...")
+                df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        
+        if df.empty:
+            print("No data available for model initialization")
+            return
+            
+        print(f"Using {len(df)} bars for model initialization (includes historical buffer)")
+        
         # Calculate technical indicators
         df = calculate_technical_indicators(df, None)
         
@@ -418,34 +438,75 @@ class CoinbaseAPIClient:
             visualize_importance=False
         )
         
+        # Initialize running statistics from the full historical dataset
+        print("Loading running statistics from full dataset...")
+        if not self.initialize_running_stats_from_csv():
+            print("Warning: Failed to initialize running stats, using current data only")
+            # Fallback to current data if CSV loading fails
+            self.running_stats = {}
+            for col in self.current_features:
+                if col in df_processed.columns:
+                    values = df_processed[col].dropna()
+                    self.running_stats[col] = {
+                        'sum': float(values.sum()),
+                        'sum_sq': float((values ** 2).sum()),
+                        'count': len(values)
+                    }
         
         self.model = xgb.XGBRegressor(**self.model_params)
         
-        # Get preprocessed features and target
-        X_initial = df_processed[self.current_features].copy()
-        for col in self.current_features:
-            # Use expanding mean/std for scaling with shift to prevent look-ahead bias
-            mean = X_initial[col].expanding(min_periods=1).mean().shift(1)
-            std = X_initial[col].expanding(min_periods=1).std().shift(1)
-            X_initial[col] = (X_initial[col] - mean) / (std + 1e-8)
-            
-        y_initial = df_processed[target_cols].values.ravel()
+        # Get preprocessed features and target using incremental standardization
+        X_initial = []
+        y_initial = []
         
-        # Train model
-        self.model.fit(X_initial, y_initial)
+        # Reset running stats for training (they're already initialized from CSV or fallback)
+        temp_running_stats = {col: self.running_stats[col].copy() for col in self.current_features if col in self.running_stats}
+        
+        # Process each row sequentially to build training data with incremental standardization
+        for i in range(len(df_processed)):
+            row = df_processed.iloc[i]
+            row_features = {col: row[col] for col in self.current_features if col in df_processed.columns}
+            
+            # Get standardized features using current running stats
+            if i > 0:  # Skip first row as we need previous data for standardization
+                standardized_row = self.get_expanding_standardization_with_stats(row_features, temp_running_stats)
+                X_initial.append([standardized_row.get(col, 0.0) for col in self.current_features])
+                y_initial.append(row[target_cols[0]])  # Assuming single target
+            
+            # Update temp running stats with current row
+            for col, value in row_features.items():
+                if col in temp_running_stats and not np.isnan(value):
+                    temp_running_stats[col]['sum'] += value
+                    temp_running_stats[col]['sum_sq'] += value ** 2
+                    temp_running_stats[col]['count'] += 1
+        
+        if X_initial:
+            X_initial = np.array(X_initial)
+            y_initial = np.array(y_initial)
+            
+            # Train model
+            self.model.fit(X_initial, y_initial)
         print("Model initialized successfully")
         
-    def update_model(self, df):
+    def update_model(self, df=None):
         """Update the model with new data"""
-        if len(df) < self.window_size:
-            return
-            
         # Check if it's time to retrain
         if not self.should_retrain_model():
             return
             
         retrain_minutes = self.retrain_interval * 15
         print(f"\nRetraining model at {datetime.now().strftime('%H:%M:%S')} (every {retrain_minutes} minutes)...")
+        
+        # Load data with historical buffer for proper technical indicator calculation
+        if df is None or len(df) < 500:
+            print("Loading data with historical buffer for model retraining...")
+            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        
+        if df.empty or len(df) < self.window_size:
+            print("Insufficient data for model retraining")
+            return
+            
+        print(f"Using {len(df)} bars for model retraining (includes historical buffer)")
         
         # Calculate technical indicators
         df = calculate_technical_indicators(df, None)
@@ -465,41 +526,86 @@ class CoinbaseAPIClient:
                 visualize_importance=False
             )
         
-        # Get preprocessed features and target
-        X = df_processed[self.current_features].copy()
-        for col in self.current_features:
-            # Use expanding mean/std for scaling with shift to prevent look-ahead bias
-            mean = X[col].expanding(min_periods=1).mean().shift(1)
-            std = X[col].expanding(min_periods=1).std().shift(1)
-            X[col] = (X[col] - mean) / (std + 1e-8)
-            
-        y = df_processed[target_cols].values.ravel()
+        # Get preprocessed features and target using incremental standardization
+        X = []
+        y = []
         
-        # Update model
-        self.model.fit(X, y)
+        # Use current running stats for retraining
+        temp_running_stats = {col: self.running_stats[col].copy() for col in self.current_features if col in self.running_stats}
+        
+        # Process each row sequentially to build training data with incremental standardization
+        for i in range(len(df_processed)):
+            row = df_processed.iloc[i]
+            row_features = {col: row[col] for col in self.current_features if col in df_processed.columns}
+            
+            # Get standardized features using current running stats
+            if i > 0:  # Skip first row as we need previous data for standardization
+                standardized_row = self.get_expanding_standardization_with_stats(row_features, temp_running_stats)
+                X.append([standardized_row.get(col, 0.0) for col in self.current_features])
+                y.append(row[target_cols[0]])  # Assuming single target
+            
+            # Update temp running stats with current row
+            for col, value in row_features.items():
+                if col in temp_running_stats and not np.isnan(value):
+                    temp_running_stats[col]['sum'] += value
+                    temp_running_stats[col]['sum_sq'] += value ** 2
+                    temp_running_stats[col]['count'] += 1
+        
+        if X:
+            X = np.array(X)
+            y = np.array(y)
+            
+            # Update model
+            self.model.fit(X, y)
         print("Model updated successfully")
         
-    def predict_next_bar(self, df):
-        """Predict the next bar's price change"""
-        if self.model is None or len(df) < self.window_size:
+    def predict_next_bar(self, df=None):
+        """Predict the next bar's price change using incremental standardization"""
+        if self.model is None:
             return None
             
-        # Calculate technical indicators
+        # Load data with historical buffer for proper technical indicator calculation
+        if df is None or len(df) < 500:
+            print("Loading data with historical buffer for prediction...")
+            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        
+        if df.empty or len(df) < self.window_size:
+            print("Insufficient data for prediction")
+            return None
+            
+        # Calculate technical indicators for latest data
         df = calculate_technical_indicators(df, None)
         
         # Preprocess data using the utility function
         df_processed, feature_cols, target_cols = preprocess_data(df)
         
-        # Get preprocessed features for prediction
-        X = df_processed[self.current_features].copy()
-        for col in self.current_features:
-            # Use expanding mean/std for scaling with shift to prevent look-ahead bias
-            mean = X[col].expanding(min_periods=1).mean().shift(1)
-            std = X[col].expanding(min_periods=1).std().shift(1)
-            X[col] = (X[col] - mean) / (std + 1e-8)
+        # Get the latest row features
+        latest_row = df_processed.iloc[-1]
+        new_features = {col: latest_row[col] for col in self.current_features if col in df_processed.columns}
+        
+        # Get standardized features using running statistics
+        if self.running_stats:
+            # Use incremental standardization
+            standardized_features = self.get_expanding_standardization(new_features)
+            
+            # Update running stats with the new data point
+            self.update_running_stats(new_features)
+            
+            # Create feature array for prediction
+            X_pred = np.array([[standardized_features.get(col, 0.0) for col in self.current_features]])
+        else:
+            # Fallback to traditional expanding standardization if running stats not available
+            print("Warning: Using fallback standardization method")
+            X = df_processed[self.current_features].copy()
+            for col in self.current_features:
+                mean = X[col].expanding(min_periods=1).mean().shift(1)
+                std = X[col].expanding(min_periods=1).std().shift(1)
+                X[col] = (X[col] - mean) / (std + 1e-8)
+            
+            X_pred = X.iloc[[-1]].values
         
         # Make prediction
-        prediction = self.model.predict(X.iloc[[-1]])[0]
+        prediction = self.model.predict(X_pred)[0]
         return prediction
     
     def should_retrain_model(self):
@@ -772,6 +878,248 @@ class CoinbaseAPIClient:
         except Exception as e:
             print(f"Error closing trade {order_id}: {e}")
     
+    def load_data_with_historical_buffer(self, csv_file_path='DB/XRP_USD_fifteenminute_historical.csv', buffer_bars=1000, current_bars=350):
+        """
+        Load data with historical buffer for proper technical indicator calculation.
+        Returns DataFrame with buffer_bars + current_bars, where the last current_bars are the most recent.
+        
+        Args:
+            csv_file_path: Path to historical data CSV
+            buffer_bars: Number of historical bars for indicator calculation (default 1000)
+            current_bars: Number of current bars for analysis (default 350)
+        """
+        try:
+            print(f"Loading data with {buffer_bars}-bar historical buffer + {current_bars} current bars...")
+            
+            # Try to load from CSV first
+            try:
+                historical_df = pd.read_csv(csv_file_path)
+                historical_df['Date'] = pd.to_datetime(historical_df['Date'])
+                historical_df = historical_df.set_index('Date').sort_index()
+                print(f"Loaded {len(historical_df)} historical bars from CSV")
+                
+                # Get the most recent buffer_bars + current_bars
+                total_needed = buffer_bars + current_bars
+                if len(historical_df) >= total_needed:
+                    buffered_df = historical_df.tail(total_needed).copy()
+                    # Reset index to make Date a column instead of index
+                    buffered_df = buffered_df.reset_index()
+                    print(f"Using {len(buffered_df)} bars from CSV ({buffer_bars} buffer + {current_bars} current)")
+                    return buffered_df
+                else:
+                    print(f"CSV has only {len(historical_df)} bars, need {total_needed}. Using all available from CSV.")
+                    buffered_df = historical_df.copy()
+                    
+                    # Fetch additional bars from API to reach total_needed
+                    remaining_needed = total_needed - len(historical_df)
+                    print(f"Fetching {remaining_needed} additional bars from API...")
+                    
+                    # Get the oldest date in CSV to know where to start fetching
+                    oldest_csv_date = historical_df.index.min()
+                    
+                    # Fetch older data
+                    end_time = oldest_csv_date
+                    start_time = end_time - timedelta(minutes=remaining_needed * 15)
+                    
+                    older_candles = self.get_product_candles(
+                        product_id=self.symbol,
+                        start=int(start_time.timestamp()),
+                        end=int(end_time.timestamp()),
+                        granularity='FIFTEEN_MINUTE'
+                    )
+                    
+                    if older_candles:
+                        older_df = convert_coinbase_candles_to_dataframe(older_candles)
+                        if not older_df.empty:
+                            # Combine older data with CSV data
+                            buffered_df = pd.concat([older_df, historical_df], ignore_index=False)
+                            buffered_df = buffered_df.sort_index().drop_duplicates()
+                            buffered_df = buffered_df.tail(total_needed)
+                            print(f"Combined with API data: {len(buffered_df)} total bars")
+                    
+                    # Reset index to make Date a column instead of index
+                    buffered_df = buffered_df.reset_index()
+                    return buffered_df
+                    
+            except FileNotFoundError:
+                print("No CSV file found, fetching all data from API...")
+                
+                # Fetch all needed data from API
+                total_needed = buffer_bars + current_bars
+                candles = self.get_multiple_candles(
+                    product_id=self.symbol,
+                    target_candles=min(total_needed, 350),  # API limit
+                    granularity='FIFTEEN_MINUTE'
+                )
+                
+                if candles:
+                    df = convert_coinbase_candles_to_dataframe(candles)
+                    if not df.empty:
+                        # Reset index to make Date a column instead of index
+                        df = df.reset_index()
+                        df = df.rename(columns={'index': 'Date'})
+                        print(f"Fetched {len(df)} bars from API")
+                        return df
+                
+                print("Failed to fetch data from API")
+                return pd.DataFrame()
+                
+        except Exception as e:
+            print(f"Error loading data with buffer: {e}")
+            return pd.DataFrame()
+    
+    def initialize_running_stats_from_csv(self, csv_file_path='DB/XRP_USD_fifteenminute_historical.csv'):
+        """Initialize running statistics from the full historical dataset"""
+        try:
+            print("Initializing running statistics from full dataset...")
+            
+            # Load full dataset
+            df = pd.read_csv(csv_file_path)
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date').sort_index()
+            
+            # Calculate technical indicators and preprocess
+            df = calculate_technical_indicators(df, None)
+            df_processed, feature_cols, target_cols = preprocess_data(df)
+            
+            # Initialize running stats for each feature
+            self.running_stats = {}
+            
+            for col in self.current_features:
+                if col in df_processed.columns:
+                    values = df_processed[col].dropna()
+                    self.running_stats[col] = {
+                        'sum': float(values.sum()),
+                        'sum_sq': float((values ** 2).sum()),
+                        'count': len(values)
+                    }
+            
+            # Track the last processed timestamp
+            self.last_processed_timestamp = df_processed.index[-1]
+            
+            print(f"Initialized running stats for {len(self.running_stats)} features")
+            print(f"Last processed timestamp: {self.last_processed_timestamp}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error initializing running stats: {e}")
+            return False
+    
+    def update_running_stats(self, new_features):
+        """Update running statistics with new data point"""
+        for col, value in new_features.items():
+            if col in self.running_stats and not np.isnan(value):
+                self.running_stats[col]['sum'] += value
+                self.running_stats[col]['sum_sq'] += value ** 2
+                self.running_stats[col]['count'] += 1
+    
+    def get_expanding_standardization(self, new_features):
+        """Get standardized values using running statistics"""
+        standardized = {}
+        
+        for col, value in new_features.items():
+            if col in self.running_stats:
+                stats = self.running_stats[col]
+                count = stats['count']
+                
+                if count > 1:
+                    # Calculate expanding mean and std
+                    mean = stats['sum'] / count
+                    variance = (stats['sum_sq'] / count) - (mean ** 2)
+                    std = np.sqrt(max(variance, 1e-8))  # Avoid division by zero
+                    
+                    # Standardize the new value
+                    standardized[col] = (value - mean) / (std + 1e-8)
+                else:
+                    standardized[col] = 0.0  # First data point
+            else:
+                standardized[col] = 0.0  # Feature not in running stats
+        
+        return standardized
+    
+    def get_expanding_standardization_with_stats(self, new_features, temp_stats):
+        """Get standardized values using provided running statistics (for training)"""
+        standardized = {}
+        
+        for col, value in new_features.items():
+            if col in temp_stats:
+                stats = temp_stats[col]
+                count = stats['count']
+                
+                if count > 1:
+                    # Calculate expanding mean and std
+                    mean = stats['sum'] / count
+                    variance = (stats['sum_sq'] / count) - (mean ** 2)
+                    std = np.sqrt(max(variance, 1e-8))  # Avoid division by zero
+                    
+                    # Standardize the new value
+                    standardized[col] = (value - mean) / (std + 1e-8)
+                else:
+                    standardized[col] = 0.0  # First data point
+            else:
+                standardized[col] = 0.0  # Feature not in running stats
+        
+        return standardized
+    
+    def update_csv_with_latest_candle(self, df, csv_file_path='DB/XRP_USD_fifteenminute_historical.csv'):
+        """Update CSV file with the latest candle from the DataFrame"""
+        try:
+            # Get the latest candle (last row)
+            latest_candle = df.iloc[[-1]].copy()
+            
+            # Add Date column if it's not already there
+            if 'Date' not in latest_candle.columns:
+                latest_candle = latest_candle.reset_index()
+                latest_candle = latest_candle.rename(columns={'index': 'Date'})
+            
+            latest_date = latest_candle['Date'].iloc[0] if 'Date' in latest_candle.columns else latest_candle.index[0]
+            latest_close = latest_candle['Close'].iloc[0]
+            
+            # Load existing data
+            try:
+                existing_df = pd.read_csv(csv_file_path)
+                existing_df['Date'] = pd.to_datetime(existing_df['Date'])
+                
+                # Check if this candle already exists
+                if latest_date in existing_df['Date'].values:
+                    print(f"Candle for {latest_date} already exists, skipping CSV update...")
+                    return True
+                
+                # Add Date column to latest_candle if it's in the index
+                if 'Date' not in latest_candle.columns:
+                    latest_candle_for_csv = latest_candle.reset_index()
+                    latest_candle_for_csv = latest_candle_for_csv.rename(columns={'index': 'Date'})
+                else:
+                    latest_candle_for_csv = latest_candle.copy()
+                
+                # Append the new candle
+                updated_df = pd.concat([existing_df, latest_candle_for_csv], ignore_index=True)
+                updated_df = updated_df.sort_values('Date').reset_index(drop=True)
+                
+            except FileNotFoundError:
+                # Create new file with this candle
+                if 'Date' not in latest_candle.columns:
+                    updated_df = latest_candle.reset_index()
+                    updated_df = updated_df.rename(columns={'index': 'Date'})
+                else:
+                    updated_df = latest_candle.copy()
+            
+            # Save updated data
+            import os
+            os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
+            updated_df.to_csv(csv_file_path, index=False)
+            
+            # Update last processed timestamp for running stats tracking
+            self.last_processed_timestamp = latest_date
+            
+            print(f"✅ Added new candle to CSV: {latest_date} - Close: ${latest_close:.4f}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error updating CSV with latest candle: {e}")
+            return False
+    
     def start_live_trading(self, update_interval=900):  # 15 minutes = 900 seconds
         """Start live trading with periodic updates"""
         if not self.client:
@@ -791,26 +1139,8 @@ class CoinbaseAPIClient:
         # Start the order monitoring thread
         self.start_order_monitor()
         
-        # Get initial historical data
-        print("\nFetching initial historical data...")
-        candles = self.get_multiple_candles(
-            product_id=self.symbol,
-            target_candles=350,
-            granularity='FIFTEEN_MINUTE'
-        )
-        
-        if not candles:
-            print("Failed to get initial data")
-            return
-            
-        # Convert to DataFrame
-        df = convert_coinbase_candles_to_dataframe(candles)
-        if df.empty:
-            print("Failed to convert data")
-            return
-            
-        # Initialize model
-        self.initialize_model(df)
+        # Initialize model (it will load data with historical buffer automatically)
+        self.initialize_model()
         
         print("\nLive trading started. Press Ctrl+C to stop.")
         print(f"Data updates: Every 15 minutes")
@@ -832,18 +1162,21 @@ class CoinbaseAPIClient:
                     if candles:
                         df = convert_coinbase_candles_to_dataframe(candles)
                         if not df.empty:
-                            # Update model if needed (uses separate retrain interval)
-                            self.update_model(df)
+                            # Update CSV file with the latest candle
+                            self.update_csv_with_latest_candle(df)
                             
-                            # Get current price
+                            # Get current price for trading
                             current_price = df['Close'].iloc[-1]
                             print(f"Current price: ${current_price:.4f}")
                             
                             # Update existing trades
                             self.update_trades(current_price)
                             
-                            # Make prediction
-                            prediction = self.predict_next_bar(df)
+                            # Update model if needed (will load data with buffer internally)
+                            self.update_model()
+                            
+                            # Make prediction (will load data with buffer internally)
+                            prediction = self.predict_next_bar()
                             if prediction is not None:
                                 print(f"Predicted price change: {prediction:.4f}")
                                 
@@ -936,11 +1269,11 @@ class CoinbaseAPIClient:
     
     def get_multiple_candles(self, product_id, target_candles=350, granularity='FIFTEEN_MINUTE'):
         """
-        Fetch candles (API limit is 350, so we use 300 to be safe)
+        Fetch candles (API limit is 350, so we use 350 to be safe)
         
         Args:
             product_id: Trading pair (e.g., 'XRP-USD')
-            target_candles: Number of candles to fetch (max 300 due to API limit)
+            target_candles: Number of candles to fetch (max 350 due to API limit)
             granularity: Candle size
         """
         all_candles = []
@@ -1046,6 +1379,336 @@ def load_cdp_api_key():
     except Exception as e:
         print(f"Error loading CDP API key: {e}")
         return None, None
+
+def analyze_csv_gaps(csv_file_path='DB/XRP_USD_fifteenminute_historical.csv'):
+    """
+    Analyze CSV file to detect all time gaps and return gap information
+    """
+    try:
+        df = pd.read_csv(csv_file_path)
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date').reset_index(drop=True)
+        
+        print(f"=== Gap Analysis for {csv_file_path} ===")
+        print(f"Total rows: {len(df)}")
+        print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+        
+        # Calculate time differences between consecutive rows
+        df['time_diff'] = df['Date'].diff()
+        
+        # Find gaps larger than 15 minutes (missing candles)
+        gaps = df[df['time_diff'] > pd.Timedelta(minutes=16)].copy()
+        
+        if len(gaps) == 0:
+            print("✅ No gaps found - data is continuous!")
+            return []
+        
+        print(f"\n❌ Found {len(gaps)} gaps larger than 15 minutes:")
+        
+        gap_list = []
+        for i, gap_row in gaps.iterrows():
+            if i > 0:
+                prev_date = df.iloc[i-1]['Date']
+                curr_date = gap_row['Date']
+                gap_hours = gap_row['time_diff'].total_seconds() / 3600
+                missing_candles = int(gap_hours * 4)  # 4 candles per hour (15-min intervals)
+                
+                gap_info = {
+                    'start': prev_date,
+                    'end': curr_date,
+                    'duration_hours': gap_hours,
+                    'missing_candles': missing_candles
+                }
+                gap_list.append(gap_info)
+                
+                print(f"  Gap #{len(gap_list)}: {prev_date} -> {curr_date}")
+                print(f"    Duration: {gap_hours:.1f} hours ({missing_candles} missing candles)")
+        
+        return gap_list
+        
+    except Exception as e:
+        print(f"Error analyzing gaps: {e}")
+        return []
+
+def fill_all_gaps(csv_file_path='DB/XRP_USD_fifteenminute_historical.csv', max_gaps_to_fill=50):
+    """
+    Comprehensive gap filling function that detects and fills all gaps in historical data
+    """
+    print("=== Comprehensive Gap Filling ===")
+    
+    # Load API credentials
+    api_key, api_secret = load_cdp_api_key()
+    if not api_key or not api_secret:
+        print("Failed to load API credentials. Exiting.")
+        return False
+    
+    # Initialize API client
+    api = CoinbaseAPIClient(api_key=api_key, api_secret=api_secret)
+    
+    # Analyze existing gaps
+    gaps = analyze_csv_gaps(csv_file_path)
+    if not gaps:
+        print("No gaps to fill!")
+        return True
+    
+    print(f"\nFound {len(gaps)} gaps to fill (processing up to {max_gaps_to_fill})")
+    
+    # Load existing data
+    df = pd.read_csv(csv_file_path)
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+    
+    filled_gaps = 0
+    total_bars_added = 0
+    
+    # Process gaps from newest to oldest to maintain data integrity
+    for i, gap in enumerate(sorted(gaps, key=lambda x: x['start'], reverse=True)[:max_gaps_to_fill]):
+        print(f"\n🔧 Filling gap #{i+1}/{min(len(gaps), max_gaps_to_fill)}")
+        print(f"   From: {gap['start']}")
+        print(f"   To: {gap['end']}")
+        print(f"   Duration: {gap['duration_hours']:.1f} hours")
+        
+        # Calculate how many API requests needed
+        max_bars_per_request = 300  # Safe limit
+        minutes_per_bar = 15
+        total_minutes_needed = gap['duration_hours'] * 60
+        bars_needed = int(total_minutes_needed / minutes_per_bar)
+        requests_needed = max(1, (bars_needed // max_bars_per_request) + 1)
+        
+        print(f"   Need ~{bars_needed} bars ({requests_needed} API requests)")
+        
+        if requests_needed > 20:  # Safety limit
+            print(f"   ⚠️  Gap too large ({requests_needed} requests), skipping...")
+            continue
+        
+        # Fetch data to fill this gap
+        gap_data = []
+        current_end = gap['end']
+        
+        for req_num in range(min(requests_needed, 20)):
+            # Calculate start time for this request
+            minutes_this_request = min(max_bars_per_request * minutes_per_bar, 
+                                     total_minutes_needed - req_num * max_bars_per_request * minutes_per_bar)
+            current_start = current_end - timedelta(minutes=minutes_this_request)
+            
+            # Don't go before the gap start
+            if current_start < gap['start']:
+                current_start = gap['start']
+            
+            print(f"     Request {req_num+1}: {current_start} to {current_end}")
+            
+            try:
+                gap_candles = api.get_product_candles(
+                    product_id='XRP-USD',
+                    start=int(current_start.timestamp()),
+                    end=int(current_end.timestamp()),
+                    granularity='FIFTEEN_MINUTE'
+                )
+                
+                if gap_candles:
+                    gap_df = convert_coinbase_candles_to_dataframe(gap_candles)
+                    if not gap_df.empty:
+                        gap_df = gap_df.reset_index()
+                        gap_df = gap_df.rename(columns={'index': 'Date'})
+                        # Filter to only data within the gap period
+                        gap_df = gap_df[(gap_df['Date'] > gap['start']) & (gap_df['Date'] < gap['end'])]
+                        if not gap_df.empty:
+                            gap_data.append(gap_df)
+                            print(f"       Got {len(gap_df)} bars")
+                        else:
+                            print(f"       No data in gap period")
+                    else:
+                        print(f"       Failed to convert candle data")
+                else:
+                    print(f"       No candles returned")
+                
+                # Update for next iteration
+                current_end = current_start
+                if current_start <= gap['start']:
+                    break
+                    
+                # Rate limiting
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"       Error fetching data: {e}")
+                continue
+        
+        # Combine gap data and add to main dataframe
+        if gap_data:
+            combined_gap_df = pd.concat(gap_data, ignore_index=True)
+            combined_gap_df = combined_gap_df.sort_values('Date').drop_duplicates(subset=['Date'], keep='first')
+            
+            # Add to main dataframe
+            df = pd.concat([df, combined_gap_df], ignore_index=True)
+            df = df.sort_values('Date').drop_duplicates(subset=['Date'], keep='first').reset_index(drop=True)
+            
+            bars_added = len(combined_gap_df)
+            total_bars_added += bars_added
+            filled_gaps += 1
+            
+            print(f"   ✅ Added {bars_added} bars to fill gap")
+        else:
+            print(f"   ❌ Failed to get data for this gap")
+    
+    # Save updated data
+    if filled_gaps > 0:
+        df.to_csv(csv_file_path, index=False)
+        print(f"\n🎉 Gap filling complete!")
+        print(f"   Filled {filled_gaps} gaps")
+        print(f"   Added {total_bars_added} total bars")
+        print(f"   Updated file: {csv_file_path}")
+        
+        # Re-analyze to show improvement
+        print("\n📊 Post-fill analysis:")
+        remaining_gaps = analyze_csv_gaps(csv_file_path)
+        if len(remaining_gaps) < len(gaps):
+            print(f"✅ Reduced gaps from {len(gaps)} to {len(remaining_gaps)}")
+        else:
+            print(f"⚠️  Still have {len(remaining_gaps)} gaps remaining")
+    else:
+        print("\n❌ No gaps were successfully filled")
+    
+    return filled_gaps > 0
+
+def update_historical_data(csv_file_path='DB/XRP_USD_fifteenminute_historical.csv'):
+    """
+    Enhanced function to update historical data with comprehensive gap detection and filling
+    """
+    print("=== Enhanced Historical Data Update ===")
+    
+    # First, fill any existing gaps in the historical data
+    print("Step 1: Analyzing and filling existing gaps...")
+    fill_all_gaps(csv_file_path)
+    
+    # Then proceed with normal update (add latest data)
+    print("\nStep 2: Adding latest data...")
+    
+    # Load API credentials
+    api_key, api_secret = load_cdp_api_key()
+    if not api_key or not api_secret:
+        print("Failed to load API credentials. Exiting.")
+        return
+    
+    # Initialize API client
+    api = CoinbaseAPIClient(api_key=api_key, api_secret=api_secret)
+    
+    # Load existing data
+    try:
+        existing_df = pd.read_csv(csv_file_path)
+        existing_df['Date'] = pd.to_datetime(existing_df['Date'])
+        existing_df = existing_df.sort_values('Date').reset_index(drop=True)
+        last_date = existing_df['Date'].max()
+        print(f"Loaded existing data: {len(existing_df)} rows, last date: {last_date}")
+    except FileNotFoundError:
+        print("No existing data file found. Will create new one.")
+        existing_df = pd.DataFrame()
+        last_date = None
+    
+    # Get latest 350 bars
+    print("Fetching latest 350 bars...")
+    candles = api.get_multiple_candles(
+        product_id='XRP-USD',
+        target_candles=350,
+        granularity='FIFTEEN_MINUTE'
+    )
+    
+    if not candles:
+        print("Failed to fetch candle data")
+        return
+    
+    # Convert to DataFrame
+    new_df = convert_coinbase_candles_to_dataframe(candles)
+    if new_df.empty:
+        print("Failed to convert candle data")
+        return
+    
+    # Add Date column (convert index to column)
+    new_df = new_df.reset_index()
+    new_df = new_df.rename(columns={'index': 'Date'})
+    
+    print(f"Fetched new data: {len(new_df)} rows, range: {new_df['Date'].min()} to {new_df['Date'].max()}")
+    
+    # Check for gaps and fetch more data if needed
+    if last_date is not None:
+        gap_start = last_date
+        gap_end = new_df['Date'].min()
+        gap_hours = (gap_end - gap_start).total_seconds() / 3600
+        
+        if gap_hours > 24:  # If gap is more than 24 hours, try to fill it
+            print(f"\nDetected {gap_hours:.1f} hour gap. Attempting to fill...")
+            
+            # Calculate how many 350-bar requests we need
+            bars_per_request = 300  # Safe limit
+            minutes_per_bar = 15
+            minutes_per_request = bars_per_request * minutes_per_bar
+            gap_minutes = gap_hours * 60
+            requests_needed = int(gap_minutes / minutes_per_request) + 1
+            
+            print(f"Need approximately {requests_needed} requests to fill gap")
+            
+            # Fetch data to fill the gap
+            fill_data = []
+            current_end = gap_end
+            
+            for i in range(min(requests_needed, 10)):  # Limit to 10 requests max
+                current_start = current_end - timedelta(minutes=minutes_per_request)
+                if current_start <= gap_start:
+                    current_start = gap_start + timedelta(minutes=15)  # Avoid overlap
+                
+                print(f"  Fetching gap data {i+1}/{min(requests_needed, 10)}: {current_start} to {current_end}")
+                
+                gap_candles = api.get_product_candles(
+                    product_id='XRP-USD',
+                    start=int(current_start.timestamp()),
+                    end=int(current_end.timestamp()),
+                    granularity='FIFTEEN_MINUTE'
+                )
+                
+                if gap_candles:
+                    gap_df = convert_coinbase_candles_to_dataframe(gap_candles)
+                    if not gap_df.empty:
+                        gap_df = gap_df.reset_index()
+                        gap_df = gap_df.rename(columns={'index': 'Date'})
+                        fill_data.append(gap_df)
+                        print(f"    Got {len(gap_df)} bars")
+                
+                current_end = current_start
+                if current_start <= gap_start:
+                    break
+            
+            # Combine fill data
+            if fill_data:
+                fill_df = pd.concat(fill_data, ignore_index=True)
+                fill_df = fill_df.sort_values('Date').drop_duplicates(subset=['Date'], keep='first')
+                new_df = pd.concat([fill_df, new_df], ignore_index=True)
+                print(f"Added {len(fill_df)} bars to fill gap")
+    
+    # Combine with existing data
+    if not existing_df.empty:
+        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+    else:
+        combined_df = new_df
+    
+    # Remove duplicates and sort
+    initial_count = len(combined_df)
+    combined_df = combined_df.drop_duplicates(subset=['Date'], keep='last')
+    combined_df = combined_df.sort_values('Date').reset_index(drop=True)
+    
+    print(f"\nCombined data: {initial_count} -> {len(combined_df)} rows (removed {initial_count - len(combined_df)} duplicates)")
+    print(f"Final date range: {combined_df['Date'].min()} to {combined_df['Date'].max()}")
+    
+    # Save updated data
+    import os
+    os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
+    combined_df.to_csv(csv_file_path, index=False)
+    print(f"Saved updated data to {csv_file_path}")
+    
+    # Final gap analysis
+    print("\nStep 3: Final gap analysis...")
+    analyze_csv_gaps(csv_file_path)
+    
+    return combined_df
 
 def main():
     print("=== Coinbase API Data Fetching ===")
@@ -1188,12 +1851,24 @@ def main():
             print("\n" + "="*50)
             print("TRADING OPTIONS:")
             print("1. Start live trading (continuous updates)")
-            print("2. Exit")
-            choice = input("\nEnter your choice (1 or 2): ").strip()
+            print("2. Update historical data only") 
+            print("3. Analyze CSV gaps only")
+            print("4. Fill all CSV gaps")
+            print("5. Exit")
+            choice = input("\nEnter your choice (1, 2, 3, 4, or 5): ").strip()
             
             if choice == "1":
                 print("\nStarting live trading...")
                 api.start_live_trading()
+            elif choice == "2":
+                print("\nUpdating historical data...")
+                update_historical_data()
+            elif choice == "3":
+                print("\nAnalyzing CSV gaps...")
+                analyze_csv_gaps()
+            elif choice == "4":
+                print("\nFilling all CSV gaps...")
+                fill_all_gaps()
             else:
                 print("Exiting...")
             
@@ -1203,4 +1878,10 @@ def main():
         print("Error: Failed to fetch candle data")
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    # Check if user wants to just update data
+    if len(sys.argv) > 1 and sys.argv[1] == "--update-data":
+        update_historical_data()
+    else:
+        main()
