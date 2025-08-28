@@ -21,7 +21,7 @@ from GatherData import calculate_technical_indicators
 from utils import preprocess_data, calculate_feature_importance
 
 class CoinbaseAPIClient:
-    def __init__(self, api_key=None, api_secret=None, symbol='XRP-USD'):
+    def __init__(self, api_key=None, api_secret=None, symbol='XRP-USD', years_of_data=2):
         """
         Initialize Coinbase API client using official SDK
         
@@ -29,14 +29,20 @@ class CoinbaseAPIClient:
             api_key: API key name from CDP JSON file
             api_secret: Private key from CDP JSON file
             symbol: Trading pair (default: 'XRP-USD')
+            years_of_data: Number of years of historical data to load (default: 2)
         """
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
+        self.years_of_data = years_of_data
         self.client = None
         self.model = None
         self.current_features = None
         self.window_size = 200
+        
+        # In-memory data storage
+        self.historical_data = pd.DataFrame()  # Full historical dataset with indicators
+        self.raw_data = pd.DataFrame()  # Raw OHLCV data without indicators
         
         # Incremental statistics for expanding standardization
         self.running_stats = {}  # Will store {feature: {'sum': x, 'sum_sq': x, 'count': n}}
@@ -407,23 +413,16 @@ class CoinbaseAPIClient:
         """Initialize the model with historical data"""
         print("\nInitializing model...")
         
-        # Load data with historical buffer for proper technical indicator calculation
+        # Use the full in-memory historical data (already has technical indicators)
         if df is None:
-            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
-        else:
-            # If df is provided but might not have enough historical context, reload with buffer
-            if len(df) < 500:  # If less than reasonable buffer, reload
-                print("Provided DataFrame too small, loading with historical buffer...")
-                df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+            if self.historical_data.empty:
+                print("No historical data available for model initialization")
+                return
+            df = self.historical_data.copy()
         
-        if df.empty:
-            print("No data available for model initialization")
-            return
-            
-        print(f"Using {len(df)} bars for model initialization (includes historical buffer)")
+        print(f"Using {len(df):,} bars from full historical dataset")
         
-        # Calculate technical indicators
-        df = calculate_technical_indicators(df, None)
+        # Data already has technical indicators calculated, just preprocess
         
         # Preprocess data using the utility function
         df_processed, feature_cols, target_cols = preprocess_data(df)
@@ -438,11 +437,11 @@ class CoinbaseAPIClient:
             visualize_importance=False
         )
         
-        # Initialize running statistics from the full historical dataset
-        print("Loading running statistics from full dataset...")
-        if not self.initialize_running_stats_from_csv():
-            print("Warning: Failed to initialize running stats, using current data only")
-            # Fallback to current data if CSV loading fails
+        # Initialize running statistics from the in-memory dataset
+        print("Loading running statistics from in-memory dataset...")
+        if not self.initialize_running_stats_from_memory():
+            print("Warning: Failed to initialize running stats from memory, using current data only")
+            # Fallback to current data if memory loading fails
             self.running_stats = {}
             for col in self.current_features:
                 if col in df_processed.columns:
@@ -462,7 +461,16 @@ class CoinbaseAPIClient:
         # Reset running stats for training (they're already initialized from CSV or fallback)
         temp_running_stats = {col: self.running_stats[col].copy() for col in self.current_features if col in self.running_stats}
         
+        # Use only the most recent window_size bars for training (but with full context for indicators)
+        # The buffer bars provided context for technical indicators, now we train on the recent window
+        training_start_idx = max(0, len(df_processed) - self.window_size)
+        training_df = df_processed.iloc[training_start_idx:].copy()
+        
+        print(f"Training on most recent {len(training_df)} bars (window_size: {self.window_size})")
+        print(f"Full context: {len(df_processed)} bars (buffer provided proper indicator calculation)")
+        
         # Process each row sequentially to build training data with incremental standardization
+        # Start from beginning of full dataset to maintain proper running stats, but only save recent window for training
         for i in range(len(df_processed)):
             row = df_processed.iloc[i]
             row_features = {col: row[col] for col in self.current_features if col in df_processed.columns}
@@ -470,10 +478,13 @@ class CoinbaseAPIClient:
             # Get standardized features using current running stats
             if i > 0:  # Skip first row as we need previous data for standardization
                 standardized_row = self.get_expanding_standardization_with_stats(row_features, temp_running_stats)
-                X_initial.append([standardized_row.get(col, 0.0) for col in self.current_features])
-                y_initial.append(row[target_cols[0]])  # Assuming single target
+                
+                # Only add to training data if we're in the training window
+                if i >= training_start_idx:
+                    X_initial.append([standardized_row.get(col, 0.0) for col in self.current_features])
+                    y_initial.append(row[target_cols[0]])  # Assuming single target
             
-            # Update temp running stats with current row
+            # Update temp running stats with current row (for all rows to maintain consistency)
             for col, value in row_features.items():
                 if col in temp_running_stats and not np.isnan(value):
                     temp_running_stats[col]['sum'] += value
@@ -497,19 +508,20 @@ class CoinbaseAPIClient:
         retrain_minutes = self.retrain_interval * 15
         print(f"\nRetraining model at {datetime.now().strftime('%H:%M:%S')} (every {retrain_minutes} minutes)...")
         
-        # Load data with historical buffer for proper technical indicator calculation
-        if df is None or len(df) < 500:
-            print("Loading data with historical buffer for model retraining...")
-            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        # Use the full in-memory historical data (already has technical indicators)
+        if df is None:
+            if self.historical_data.empty:
+                print("No historical data available for model retraining")
+                return
+            df = self.historical_data.copy()
         
-        if df.empty or len(df) < self.window_size:
-            print("Insufficient data for model retraining")
+        if len(df) < self.window_size:
+            print(f"Insufficient data for model retraining: {len(df)} < {self.window_size}")
             return
             
-        print(f"Using {len(df)} bars for model retraining (includes historical buffer)")
+        print(f"Using {len(df):,} bars from full historical dataset for retraining")
         
-        # Calculate technical indicators
-        df = calculate_technical_indicators(df, None)
+        # Data already has technical indicators calculated, just preprocess
         
         # Preprocess data using the utility function
         df_processed, feature_cols, target_cols = preprocess_data(df)
@@ -533,7 +545,16 @@ class CoinbaseAPIClient:
         # Use current running stats for retraining
         temp_running_stats = {col: self.running_stats[col].copy() for col in self.current_features if col in self.running_stats}
         
+        # Use only the most recent window_size bars for retraining (but with full context for indicators)
+        # The buffer bars provided context for technical indicators, now we retrain on the recent window
+        training_start_idx = max(0, len(df_processed) - self.window_size)
+        training_df = df_processed.iloc[training_start_idx:].copy()
+        
+        print(f"Retraining on most recent {len(training_df)} bars (window_size: {self.window_size})")
+        print(f"Full context: {len(df_processed)} bars (buffer provided proper indicator calculation)")
+        
         # Process each row sequentially to build training data with incremental standardization
+        # Start from beginning of full dataset to maintain proper running stats, but only save recent window for training
         for i in range(len(df_processed)):
             row = df_processed.iloc[i]
             row_features = {col: row[col] for col in self.current_features if col in df_processed.columns}
@@ -541,10 +562,13 @@ class CoinbaseAPIClient:
             # Get standardized features using current running stats
             if i > 0:  # Skip first row as we need previous data for standardization
                 standardized_row = self.get_expanding_standardization_with_stats(row_features, temp_running_stats)
-                X.append([standardized_row.get(col, 0.0) for col in self.current_features])
-                y.append(row[target_cols[0]])  # Assuming single target
+                
+                # Only add to training data if we're in the training window
+                if i >= training_start_idx:
+                    X.append([standardized_row.get(col, 0.0) for col in self.current_features])
+                    y.append(row[target_cols[0]])  # Assuming single target
             
-            # Update temp running stats with current row
+            # Update temp running stats with current row (for all rows to maintain consistency)
             for col, value in row_features.items():
                 if col in temp_running_stats and not np.isnan(value):
                     temp_running_stats[col]['sum'] += value
@@ -564,17 +588,18 @@ class CoinbaseAPIClient:
         if self.model is None:
             return None
             
-        # Load data with historical buffer for proper technical indicator calculation
-        if df is None or len(df) < 500:
-            print("Loading data with historical buffer for prediction...")
-            df = self.load_data_with_historical_buffer(buffer_bars=1000, current_bars=350)
+        # Use the full in-memory historical data (already has technical indicators)
+        if df is None:
+            if self.historical_data.empty:
+                print("No historical data available for prediction")
+                return None
+            df = self.historical_data.copy()
         
-        if df.empty or len(df) < self.window_size:
-            print("Insufficient data for prediction")
+        if len(df) < self.window_size:
+            print(f"Insufficient data for prediction: {len(df)} < {self.window_size}")
             return None
             
-        # Calculate technical indicators for latest data
-        df = calculate_technical_indicators(df, None)
+        # Data already has technical indicators calculated, just preprocess
         
         # Preprocess data using the utility function
         df_processed, feature_cols, target_cols = preprocess_data(df)
@@ -878,18 +903,197 @@ class CoinbaseAPIClient:
         except Exception as e:
             print(f"Error closing trade {order_id}: {e}")
     
-    def load_data_with_historical_buffer(self, csv_file_path='DB/XRP_USD_fifteenminute_historical.csv', buffer_bars=1000, current_bars=350):
+    def load_historical_data_from_api(self):
         """
-        Load data with historical buffer for proper technical indicator calculation.
+        Load X years of historical data from API into memory.
+        Maintains the same DataFrame structure as CSV loading for compatibility.
+        """
+        try:
+            print(f"\n=== Loading {self.years_of_data} years of historical data from API ===")
+            
+            # Calculate total bars needed (15-minute intervals)
+            # 1 year ≈ 365 days × 24 hours × 4 intervals = 35,040 bars
+            bars_per_year = 365 * 24 * 4
+            total_bars_needed = int(self.years_of_data * bars_per_year)
+            
+            print(f"Target: {total_bars_needed:,} bars ({self.years_of_data} years of 15-minute data)")
+            
+            # Coinbase API limit is 350 bars per request
+            max_bars_per_request = 300  # Use 300 to be safe
+            requests_needed = (total_bars_needed // max_bars_per_request) + 1
+            
+            print(f"Will need approximately {requests_needed} API requests")
+            
+            if requests_needed > 200:  # Safety limit
+                print(f"⚠️  Too many requests needed ({requests_needed}). Limiting to 2 years maximum.")
+                total_bars_needed = 2 * bars_per_year
+                requests_needed = (total_bars_needed // max_bars_per_request) + 1
+            
+            # Collect all data
+            all_candles_data = []
+            end_time = datetime.now(timezone.utc)
+            
+            print(f"Starting data collection from {end_time.strftime('%Y-%m-%d %H:%M:%S')} backwards...")
+            
+            for i in range(min(requests_needed, 200)):  # Cap at 200 requests
+                # Calculate time range for this request
+                minutes_per_request = max_bars_per_request * 15
+                current_start = end_time - timedelta(minutes=minutes_per_request)
+                
+                print(f"  Request {i+1:3d}/{min(requests_needed, 200)}: {current_start.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
+                
+                try:
+                    candles = self.get_product_candles(
+                        product_id=self.symbol,
+                        start=int(current_start.timestamp()),
+                        end=int(end_time.timestamp()),
+                        granularity='FIFTEEN_MINUTE'
+                    )
+                    
+                    if candles and len(candles) > 0:
+                        all_candles_data.extend(candles)
+                        print(f"    ✅ Got {len(candles)} bars (Total: {len(all_candles_data):,})")
+                    else:
+                        print(f"    ❌ No data returned")
+                        
+                    # Update end_time for next iteration
+                    end_time = current_start
+                    
+                    # Rate limiting
+                    time.sleep(0.2)  # 200ms between requests
+                    
+                    # Check if we have enough data
+                    if len(all_candles_data) >= total_bars_needed:
+                        print(f"    🎯 Reached target of {total_bars_needed:,} bars")
+                        break
+                        
+                except Exception as e:
+                    print(f"    ❌ Error in request {i+1}: {e}")
+                    continue
+            
+            # Convert to DataFrame using the same method as existing code
+            if all_candles_data:
+                print(f"\n📊 Converting {len(all_candles_data):,} candles to DataFrame...")
+                
+                # Use the existing conversion function
+                self.raw_data = convert_coinbase_candles_to_dataframe(all_candles_data)
+                
+                if not self.raw_data.empty:
+                    # CRITICAL: Maintain exact same structure as CSV loading
+                    # Convert DatetimeIndex to Date column (same as load_data_with_historical_buffer)
+                    self.raw_data = self.raw_data.reset_index()
+                    self.raw_data = self.raw_data.rename(columns={'index': 'Date'})
+                    
+                    # Sort by date to ensure proper chronological order
+                    self.raw_data = self.raw_data.sort_values('Date').reset_index(drop=True)
+                    
+                    print(f"✅ Successfully loaded {len(self.raw_data):,} bars of raw data")
+                    print(f"   Date range: {self.raw_data['Date'].min()} to {self.raw_data['Date'].max()}")
+                    print(f"   Columns: {list(self.raw_data.columns)}")
+                    
+                    # Calculate technical indicators for the full dataset
+                    print(f"🔧 Calculating technical indicators...")
+                    
+                    # Prepare data for technical indicators (expects Date as index)
+                    data_for_indicators = self.raw_data.copy()
+                    if 'Date' in data_for_indicators.columns:
+                        data_for_indicators = data_for_indicators.set_index('Date')
+                    
+                    self.historical_data = calculate_technical_indicators(data_for_indicators, None)
+                    
+                    # Clean up Date ambiguity: ensure Date is ONLY a column, not index
+                    # calculate_technical_indicators creates both Date index AND Date column, fix this
+                    has_date_column = 'Date' in self.historical_data.columns
+                    has_date_index = hasattr(self.historical_data.index, 'name') and self.historical_data.index.name == 'Date'
+                    
+                    if has_date_column and has_date_index:
+                        # We have both - drop the Date column and reset index to make it a column
+                        self.historical_data = self.historical_data.drop(columns=['Date']).reset_index()
+                    elif has_date_index:
+                        # Only index is Date, reset to column
+                        self.historical_data = self.historical_data.reset_index()
+                    elif not has_date_column:
+                        # No Date column, reset index to create it
+                        self.historical_data = self.historical_data.reset_index()
+                        if 'index' in self.historical_data.columns:
+                            self.historical_data = self.historical_data.rename(columns={'index': 'Date'})
+                    
+                    print(f"✅ Historical data with indicators ready: {len(self.historical_data):,} bars")
+                    print(f"   Total columns: {len(self.historical_data.columns)}")
+                    
+                    return True
+                else:
+                    print("❌ Failed to convert candle data to DataFrame")
+                    return False
+            else:
+                print("❌ No candle data collected")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error loading historical data from API: {e}")
+            return False
+    
+    def load_data_with_historical_buffer(self, buffer_bars=1000, current_bars=350, use_csv_fallback=False):
+        """
+        Load data with historical buffer from in-memory data for proper technical indicator calculation.
         Returns DataFrame with buffer_bars + current_bars, where the last current_bars are the most recent.
         
         Args:
-            csv_file_path: Path to historical data CSV
             buffer_bars: Number of historical bars for indicator calculation (default 1000)
             current_bars: Number of current bars for analysis (default 350)
+            use_csv_fallback: If True, fallback to CSV loading if in-memory data is insufficient
         """
         try:
-            print(f"Loading data with {buffer_bars}-bar historical buffer + {current_bars} current bars...")
+            print(f"Loading data with {buffer_bars}-bar historical buffer + {current_bars} current bars from memory...")
+            
+            # First try to use in-memory data
+            if not self.raw_data.empty:
+                total_needed = buffer_bars + current_bars
+                
+                if len(self.raw_data) >= total_needed:
+                    # Get the most recent buffer_bars + current_bars from raw data
+                    buffered_df = self.raw_data.tail(total_needed).copy()
+                    
+                    print(f"✅ Using {len(buffered_df)} bars from in-memory data ({buffer_bars} buffer + {current_bars} current)")
+                    print(f"   Date range: {buffered_df['Date'].min()} to {buffered_df['Date'].max()}")
+                    
+                    return buffered_df
+                else:
+                    print(f"⚠️  In-memory data has only {len(self.raw_data)} bars, need {total_needed}")
+                    
+                    if use_csv_fallback:
+                        print("Falling back to CSV/API loading...")
+                        return self._load_data_with_historical_buffer_legacy(buffer_bars, current_bars)
+                    else:
+                        # Use all available in-memory data
+                        print(f"Using all available in-memory data: {len(self.raw_data)} bars")
+                        return self.raw_data.copy()
+            else:
+                print("❌ No in-memory data available")
+                
+                if use_csv_fallback:
+                    print("Falling back to CSV/API loading...")
+                    return self._load_data_with_historical_buffer_legacy(buffer_bars, current_bars)
+                else:
+                    print("Load historical data first using load_historical_data_from_api()")
+                    return pd.DataFrame()
+                
+        except Exception as e:
+            print(f"❌ Error loading data with buffer from memory: {e}")
+            
+            if use_csv_fallback:
+                print("Falling back to CSV/API loading...")
+                return self._load_data_with_historical_buffer_legacy(buffer_bars, current_bars)
+            else:
+                return pd.DataFrame()
+    
+    def _load_data_with_historical_buffer_legacy(self, buffer_bars=1000, current_bars=350):
+        """
+        LEGACY: Load data with historical buffer from CSV/API (kept for compatibility)
+        """
+        csv_file_path = 'DB/XRP_USD_fifteenminute_historical.csv'
+        try:
+            print(f"LEGACY: Loading data with {buffer_bars}-bar historical buffer + {current_bars} current bars...")
             
             # Try to load from CSV first
             try:
@@ -968,8 +1172,51 @@ class CoinbaseAPIClient:
             print(f"Error loading data with buffer: {e}")
             return pd.DataFrame()
     
+    def initialize_running_stats_from_memory(self):
+        """Initialize running statistics from the in-memory historical dataset"""
+        try:
+            print("Initializing running statistics from in-memory dataset...")
+            
+            if self.historical_data.empty:
+                print("❌ No historical data in memory. Load data first.")
+                return False
+            
+            # Use the existing historical data with indicators
+            df = self.historical_data.copy()
+            
+            # Preprocess the data (it already has indicators calculated)
+            df_processed, feature_cols, target_cols = preprocess_data(df)
+            
+            # Initialize running stats for each feature
+            self.running_stats = {}
+            
+            for col in self.current_features:
+                if col in df_processed.columns:
+                    values = df_processed[col].dropna()
+                    self.running_stats[col] = {
+                        'sum': float(values.sum()),
+                        'sum_sq': float((values ** 2).sum()),
+                        'count': len(values)
+                    }
+            
+            # Track the last processed timestamp
+            if 'Date' in self.historical_data.columns:
+                self.last_processed_timestamp = self.historical_data['Date'].iloc[-1]
+            else:
+                print("❌ No Date column found in historical data")
+                self.last_processed_timestamp = None
+            
+            print(f"✅ Initialized running stats for {len(self.running_stats)} features")
+            print(f"   Last processed timestamp: {self.last_processed_timestamp}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error initializing running stats from memory: {e}")
+            return False
+    
     def initialize_running_stats_from_csv(self, csv_file_path='DB/XRP_USD_fifteenminute_historical.csv'):
-        """Initialize running statistics from the full historical dataset"""
+        """Initialize running statistics from the full historical dataset (LEGACY - kept for compatibility)"""
         try:
             print("Initializing running statistics from full dataset...")
             
@@ -1120,6 +1367,88 @@ class CoinbaseAPIClient:
             print(f"❌ Error updating CSV with latest candle: {e}")
             return False
     
+    def update_memory_with_new_candles(self, df):
+        """Update in-memory data with any new candles from the 350-bar fetch"""
+        try:
+            if self.raw_data.empty:
+                print("❌ No existing raw data in memory")
+                return False
+            
+            # Get the latest timestamp we already have
+            latest_existing_date = self.raw_data['Date'].max()
+            
+            # Find any new candles (after our latest timestamp)
+            new_candles = df[df['Date'] > latest_existing_date].copy()
+            
+            if new_candles.empty:
+                print(f"No new candles found. Latest in memory: {latest_existing_date}")
+                return True
+            
+            print(f"Found {len(new_candles)} new candles to add to memory")
+            
+            # Add new candles to raw data
+            self.raw_data = pd.concat([self.raw_data, new_candles], ignore_index=True)
+            self.raw_data = self.raw_data.sort_values('Date').reset_index(drop=True)
+            
+            # Recalculate technical indicators for the full updated dataset
+            print(f"Recalculating technical indicators with {len(new_candles)} new candles...")
+            
+            # Prepare data for technical indicators (expects Date as index)
+            data_for_indicators = self.raw_data.copy()
+            if 'Date' in data_for_indicators.columns:
+                data_for_indicators = data_for_indicators.set_index('Date')
+            
+            self.historical_data = calculate_technical_indicators(data_for_indicators, None)
+            
+            # Clean up Date ambiguity: ensure Date is ONLY a column, not index
+            # calculate_technical_indicators creates both Date index AND Date column, fix this
+            if 'Date' in self.historical_data.columns and hasattr(self.historical_data.index, 'name') and self.historical_data.index.name == 'Date':
+                # We have both - drop the Date column and reset index to make it a column
+                self.historical_data = self.historical_data.drop(columns=['Date']).reset_index()
+            elif hasattr(self.historical_data.index, 'name') and self.historical_data.index.name == 'Date':
+                # Only index is Date, reset to column
+                self.historical_data = self.historical_data.reset_index()
+            elif 'Date' not in self.historical_data.columns:
+                # No Date column, reset index to create it
+                self.historical_data = self.historical_data.reset_index()
+                if 'index' in self.historical_data.columns:
+                    self.historical_data = self.historical_data.rename(columns={'index': 'Date'})
+            
+            # Update running statistics with the new candles
+            if self.current_features and self.running_stats:
+                print(f"Updating running statistics with {len(new_candles)} new candles...")
+                
+                # Process each new candle to update running stats
+                for _, new_candle_row in new_candles.iterrows():
+                    # Get the technical indicators for this candle from the updated historical data
+                    candle_date = new_candle_row['Date']
+                    indicator_row = self.historical_data[self.historical_data['Date'] == candle_date]
+                    
+                    if not indicator_row.empty:
+                        # Preprocess this single row to get features
+                        temp_df = indicator_row.copy()
+                        try:
+                            df_processed, _, _ = preprocess_data(temp_df)
+                            if not df_processed.empty:
+                                row_features = {col: df_processed.iloc[0][col] for col in self.current_features if col in df_processed.columns}
+                                self.update_running_stats(row_features)
+                        except Exception as e:
+                            print(f"Warning: Could not update running stats for candle {candle_date}: {e}")
+            
+            # Update last processed timestamp
+            self.last_processed_timestamp = self.raw_data['Date'].max()
+            
+            latest_close = new_candles['Close'].iloc[-1]
+            print(f"✅ Added {len(new_candles)} new candles to memory")
+            print(f"   Latest: {self.last_processed_timestamp} - Close: ${latest_close:.4f}")
+            print(f"   Total bars in memory: {len(self.raw_data):,}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error updating memory with new candles: {e}")
+            return False
+    
     def start_live_trading(self, update_interval=900):  # 15 minutes = 900 seconds
         """Start live trading with periodic updates"""
         if not self.client:
@@ -1139,7 +1468,7 @@ class CoinbaseAPIClient:
         # Start the order monitoring thread
         self.start_order_monitor()
         
-        # Initialize model (it will load data with historical buffer automatically)
+        # Initialize model (uses full in-memory dataset)
         self.initialize_model()
         
         print("\nLive trading started. Press Ctrl+C to stop.")
@@ -1162,8 +1491,12 @@ class CoinbaseAPIClient:
                     if candles:
                         df = convert_coinbase_candles_to_dataframe(candles)
                         if not df.empty:
-                            # Update CSV file with the latest candle
-                            self.update_csv_with_latest_candle(df)
+                            # Convert to proper format for memory update
+                            df = df.reset_index()
+                            df = df.rename(columns={'index': 'Date'})
+                            
+                            # Update in-memory data with any new candles (could be 1 or more if we missed some)
+                            self.update_memory_with_new_candles(df)
                             
                             # Get current price for trading
                             current_price = df['Close'].iloc[-1]
@@ -1172,10 +1505,10 @@ class CoinbaseAPIClient:
                             # Update existing trades
                             self.update_trades(current_price)
                             
-                            # Update model if needed (will load data with buffer internally)
+                            # Update model if needed (trains on last 200 bars from full dataset)
                             self.update_model()
                             
-                            # Make prediction (will load data with buffer internally)
+                            # Make prediction (uses full dataset for context)
                             prediction = self.predict_next_bar()
                             if prediction is not None:
                                 print(f"Predicted price change: {prediction:.4f}")
@@ -1186,6 +1519,7 @@ class CoinbaseAPIClient:
                                 # Print trading summary
                                 open_trades_count = self.get_open_trades_count()
                                 print(f"Capital: ${self.capital:,.2f}, Open trades: {open_trades_count}")
+                                print(f"In-memory data: {len(self.raw_data):,} bars")
                             else:
                                 print("No prediction available")
                         else:
@@ -1721,21 +2055,32 @@ def main():
         print("Failed to load API credentials. Exiting.")
         return
     
-    # Initialize Coinbase API client
-    api = CoinbaseAPIClient(api_key=api_key, api_secret=api_secret)
-    print("Using authenticated API client")
+    # Initialize Coinbase API client with 2 years of historical data
+    print("Initializing API client with historical data loading...")
+    years_data = 1#input("Enter number of years of historical data to load (default 2): ").strip()
+    try:
+        years_data = float(years_data) if years_data else 2.0
+    except ValueError:
+        years_data = 2.0
+    
+    api = CoinbaseAPIClient(api_key=api_key, api_secret=api_secret, years_of_data=years_data)
+    print(f"Using authenticated API client with {years_data} years of data")
+    
+    # Load historical data from API into memory
+    print("\n1. Loading historical data from API...")
+    if not api.load_historical_data_from_api():
+        print("❌ Failed to load historical data. Exiting.")
+        return
     
     # Sync with account orders
-    print("\nSyncing with account orders...")
+    print("\n2. Syncing with account orders...")
     api.sync_with_account_orders()
     
-    # 1. Fetch account information
-    print("\n1. Fetching account information...")
+    # 3. Fetch account information
+    print("\n3. Fetching account information...")
     accounts_response = dict(api.get_accounts())
-    #print(accounts_response)
     if accounts_response:
         accounts = accounts_response['accounts']  # Extract accounts from response
-        #print(accounts)
         for account in accounts:
             if account['currency'] == 'USD':
                 print(f"USD Balance: {account['available_balance']['value']}")
@@ -1743,8 +2088,8 @@ def main():
     else:
         print("  Failed to fetch accounts")
     
-    # 2. Fetch current orders
-    print("\n2. Fetching current orders...")
+    # 4. Fetch current orders
+    print("\n4. Fetching current orders...")
     orders_response = api.get_orders(status='OPEN')
     if orders_response:
         # Handle both dictionary and list responses
@@ -1771,111 +2116,29 @@ def main():
     else:
         print("  No open orders found")
     
-    # 3. Fetch last 400 bars for XRP/USD (15-minute candles)
-    print("\n3. Fetching XRP/USD historical data...")
+    # 5. Use in-memory historical data (already loaded and processed)
+    print(f"\n5. Using in-memory historical data...")
+    print(f"   Raw data: {len(api.raw_data):,} bars")
+    print(f"   With indicators: {len(api.historical_data):,} bars")
+    print(f"   Date range: {api.raw_data['Date'].min()} to {api.raw_data['Date'].max()}")
     
-    candles = api.get_multiple_candles(
-        product_id='XRP-USD',
-        target_candles=350,  # Reduced to stay within API limit
-        granularity='FIFTEEN_MINUTE'
-    )
+    # Get current price from the latest data
+    current_price = api.raw_data['Close'].iloc[-1]
+    print(f"   Current price: ${current_price:.4f}")
     
-    if candles:
-        # Handle the response object properly
-        if hasattr(candles, 'candles'):
-            candles_list = candles.candles
-        elif hasattr(candles, '__dict__'):
-            candles_list = candles.__dict__.get('candles', [])
-        else:
-            candles_list = list(candles)
-        
-        print(f"Fetched {len(candles_list)} candles for XRP/USD")
-        
-        # Convert to DataFrame
-        df = convert_coinbase_candles_to_dataframe(candles_list)
-        
-        if not df.empty:
-            # Calculate technical indicators
-            print("\n4. Calculating technical indicators...")
-            df_with_indicators = calculate_technical_indicators(df)
-            
-            # Save the results
-            output_file = "XRP_USD_15min_coinbase_indicators.csv"
-            df_with_indicators.to_csv(output_file)
-            print(f"Saved {len(df_with_indicators)} data points to {output_file}")
-            
-            # Print sample of the data
-            print("\nFirst few rows of the data:")
-            print(df_with_indicators.head())
-            
-            # Print date range
-            print(f"\nDate range: {df_with_indicators.index.min()} to {df_with_indicators.index.max()}")
-            
-            # Print summary statistics
-            print(f"\nSummary statistics:")
-            print(f"  - Total bars: {len(df_with_indicators)}")
-            print(f"  - Price range: ${df_with_indicators['Close'].min():.4f} - ${df_with_indicators['Close'].max():.4f}")
-            print(f"  - Current price: ${df_with_indicators['Close'].iloc[-1]:.4f}")
-            
-            # Initialize model for trading
-            print("\n5. Initializing trading model...")
-            api.initialize_model(df_with_indicators)
-            
-            # Get current price for trading
-            current_price = df_with_indicators['Close'].iloc[-1]
-            print(f"Current price: ${current_price:.4f}")
-            
-            # Make prediction (for demonstration only)
-            print("\n6. Making trading prediction...")
-            prediction = api.predict_next_bar(df_with_indicators)
-            if prediction is not None:
-                print(f"Predicted price change: {prediction:.4f}")
-                
-                # Print current status (no trading yet)
-                print(f"\nCurrent Status:")
-                print(f"  - Capital: ${api.capital:,.2f}")
-                open_trades_count = api.get_open_trades_count()
-                print(f"  - Open trades: {open_trades_count}")
-                print(f"  - Trade history: {len(api.trade_history)} trades")
-                
-                if open_trades_count > 0:
-                    print(f"  - Active orders on account: {open_trades_count}")
-                
-                if api.trade_history:
-                    total_profit = sum(trade['profit'] for trade in api.trade_history)
-                    print(f"  - Total realized P&L: ${total_profit:.2f}")
-            else:
-                print("No prediction available")
-            
-            # Ask if user wants to start live trading
-            print("\n" + "="*50)
-            print("TRADING OPTIONS:")
-            print("1. Start live trading (continuous updates)")
-            print("2. Update historical data only") 
-            print("3. Analyze CSV gaps only")
-            print("4. Fill all CSV gaps")
-            print("5. Exit")
-            choice = input("\nEnter your choice (1, 2, 3, 4, or 5): ").strip()
-            
-            if choice == "1":
-                print("\nStarting live trading...")
-                api.start_live_trading()
-            elif choice == "2":
-                print("\nUpdating historical data...")
-                update_historical_data()
-            elif choice == "3":
-                print("\nAnalyzing CSV gaps...")
-                analyze_csv_gaps()
-            elif choice == "4":
-                print("\nFilling all CSV gaps...")
-                fill_all_gaps()
-            else:
-                print("Exiting...")
-            
-        else:
-            print("Error: No data to process")
-    else:
-        print("Error: Failed to fetch candle data")
+    # Print summary statistics
+    print(f"\nSummary statistics:")
+    print(f"  - Total bars: {len(api.historical_data):,}")
+    print(f"  - Price range: ${api.raw_data['Close'].min():.4f} - ${api.raw_data['Close'].max():.4f}")
+    print(f"  - Data span: {(api.raw_data['Date'].max() - api.raw_data['Date'].min()).days} days")
+    
+    # Model will be initialized when live trading starts
+    
+    # Start live trading immediately
+    print(f"\n{'='*50}")
+    print("🚀 STARTING LIVE TRADING...")
+    print(f"{'='*50}")
+    api.start_live_trading()
 
 if __name__ == "__main__":
     import sys
