@@ -38,7 +38,7 @@ class CoinbaseAPIClient:
         self.client = None
         self.model = None
         self.current_features = None
-        self.window_size = 200
+        self.window_size = 5000
         
         # In-memory data storage
         self.historical_data = pd.DataFrame()  # Full historical dataset with indicators
@@ -497,6 +497,9 @@ class CoinbaseAPIClient:
             
             # Train model
             self.model.fit(X_initial, y_initial)
+            
+            # Log training sanity check
+            self.sanity_log(self.model, X_initial[-1:], tag="INIT_TRAIN")
         print("Model initialized successfully")
         
     def update_model(self, df=None):
@@ -581,6 +584,9 @@ class CoinbaseAPIClient:
             
             # Update model
             self.model.fit(X, y)
+            
+            # Log retraining sanity check
+            self.sanity_log(self.model, X[-1:], tag="RETRAIN")
         print("Model updated successfully")
         
     def predict_next_bar(self, df=None):
@@ -628,6 +634,13 @@ class CoinbaseAPIClient:
                 X[col] = (X[col] - mean) / (std + 1e-8)
             
             X_pred = X.iloc[[-1]].values
+        
+        # Sanity check logging before prediction
+        current_timestamp = df['Date'].iloc[-1] if 'Date' in df.columns else datetime.now()
+        self.sanity_log(self.model, X_pred, tag=str(current_timestamp))
+        
+        # Check leaf diversity for recent predictions batch
+        self.log_batch_leaf_diversity(df_processed, feature_cols=self.current_features)
         
         # Make prediction
         prediction = self.model.predict(X_pred)[0]
@@ -1173,6 +1186,151 @@ class CoinbaseAPIClient:
                 standardized[col] = 0.0  # Feature not in running stats
         
         return standardized
+    
+    def sanity_log(self, model, X_row, tag, log_file_path='DB/sanity_log.txt'):
+        """
+        Log model and prediction sanity checks to a file
+        
+        Args:
+            model: XGBoost model
+            X_row: Input features (numpy array or pandas row)
+            tag: Identifier for this log entry
+            log_file_path: Path to log file
+        """
+        try:
+            import os
+            from datetime import datetime
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+            
+            # Get model info
+            booster = model.get_booster()
+            num_trees = booster.num_boosted_rounds()
+            
+            # Handle different input types
+            if hasattr(X_row, 'values'):
+                # Pandas DataFrame/Series
+                values = X_row.values
+                X_for_apply = X_row.values
+            elif isinstance(X_row, np.ndarray):
+                # Numpy array
+                values = X_row
+                X_for_apply = X_row
+            else:
+                # List or other
+                values = np.array(X_row)
+                X_for_apply = values
+            
+            # Flatten values for stats but keep original shape for model.apply
+            if values.ndim > 1:
+                values = values.flatten()
+            
+            # Calculate basic stats
+            max_abs = np.nanmax(np.abs(values)) if len(values) > 0 else 0.0
+            nan_percent = np.mean(~np.isfinite(values)) * 100 if len(values) > 0 else 0.0
+            
+            # Calculate leaf indices for diversity check
+            leaf_diversity_info = ""
+            try:
+                # Ensure X_for_apply has correct shape for model.apply
+                if X_for_apply.ndim == 1:
+                    X_for_apply = X_for_apply.reshape(1, -1)
+                
+                # Get leaf indices for current sample(s)
+                leaf_idx = model.apply(X_for_apply)  # shape: [n_samples, n_trees]
+                
+                # If we have multiple samples, check diversity
+                if leaf_idx.shape[0] > 1:
+                    uniq = len(np.unique(leaf_idx, axis=0))
+                    total = leaf_idx.shape[0]
+                    leaf_diversity_info = f"  leaf_uniq={uniq}/{total}"
+                else:
+                    # For single sample, just show the first few leaf indices
+                    leaf_sample = leaf_idx[0][:min(5, len(leaf_idx[0]))]
+                    leaf_diversity_info = f"  leaf_sample=[{','.join(map(str, leaf_sample))}...]"
+                    
+            except Exception as e:
+                leaf_diversity_info = f"  leaf_err={str(e)[:20]}"
+            
+            # Create log entry
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            log_entry = (f"[{timestamp}] [{tag}] trees={num_trees}  "
+                        f"max|x|={max_abs:.4g}  "
+                        f"nan%={nan_percent:.1f}%  "
+                        f"features={len(values)}{leaf_diversity_info}\n")
+            
+            # Append to log file
+            with open(log_file_path, 'a', encoding='utf-8') as f:
+                f.write(log_entry)
+            
+            # Also print to console
+            print(f"[SANITY] [{tag}] trees={num_trees}  "
+                  f"max|x|={max_abs:.4g}  "
+                  f"nan%={nan_percent:.1f}%{leaf_diversity_info}")
+            
+        except Exception as e:
+            print(f"Error in sanity_log: {e}")
+    
+    def log_batch_leaf_diversity(self, df_processed, feature_cols, Kb=16):
+        """
+        Log leaf index diversity for the last Kb rows to detect model stagnation
+        
+        Args:
+            df_processed: Preprocessed dataframe with features
+            feature_cols: List of feature column names
+            Kb: Number of recent rows to check (default 16)
+        """
+        try:
+            if len(df_processed) < Kb:
+                Kb = len(df_processed)
+            
+            if Kb <= 1:
+                return
+                
+            # Get last Kb rows
+            Xb_df = df_processed[feature_cols].tail(Kb)
+            
+            # Apply incremental standardization to each row
+            X_batch = []
+            temp_running_stats = {col: self.running_stats[col].copy() for col in feature_cols if col in self.running_stats}
+            
+            for i in range(len(Xb_df)):
+                row = Xb_df.iloc[i]
+                row_features = {col: row[col] for col in feature_cols if col in Xb_df.columns}
+                
+                # Get standardized features
+                if i > 0:  # Skip first row for standardization
+                    standardized_row = self.get_expanding_standardization_with_stats(row_features, temp_running_stats)
+                    X_batch.append([standardized_row.get(col, 0.0) for col in feature_cols])
+                
+                # Update temp running stats
+                for col, value in row_features.items():
+                    if col in temp_running_stats and not np.isnan(value):
+                        temp_running_stats[col]['sum'] += value
+                        temp_running_stats[col]['sum_sq'] += value ** 2
+                        temp_running_stats[col]['count'] += 1
+            
+            if len(X_batch) > 1:
+                X_batch = np.array(X_batch)
+                
+                # Get leaf indices for the batch
+                leaf_idx = self.model.apply(X_batch)  # shape: [batch_size, n_trees]
+                uniq = len(np.unique(leaf_idx, axis=0))
+                total = leaf_idx.shape[0]
+                
+                print(f"[BATCH_DIVERSITY] Unique leaf-paths in last {total} rows: {uniq}/{total} ({uniq/total*100:.1f}%)")
+                
+                # Log to file
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_entry = f"[{timestamp}] [BATCH_DIVERSITY] batch_size={total}  leaf_uniq={uniq}/{total}  diversity={uniq/total*100:.1f}%\n"
+                
+                log_file_path = 'DB/sanity_log.txt'
+                with open(log_file_path, 'a', encoding='utf-8') as f:
+                    f.write(log_entry)
+                    
+        except Exception as e:
+            print(f"Error in log_batch_leaf_diversity: {e}")
     
     def update_memory_with_new_candles(self, df):
         """Update in-memory data with any new candles from the 350-bar fetch"""

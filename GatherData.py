@@ -153,7 +153,31 @@ def calculate_technical_indicators(df, market_data=None, timeframe=1):
     df["Rolling_Std_10"] = df["Close"].shift(1).rolling(window=10).std()
     df["Rolling_Std_20"] = df["Close"].shift(1).rolling(window=20).std()
     df["Rolling_Std_60"] = df["Close"].shift(1).rolling(window=60).std()
-    df["ATR"] = (df["High"].shift(1) - df["Low"].shift(1))
+    
+    # Calculate True Range for ATR calculations (using only past data)
+    # True Range = max(H-L, H-C_prev, C_prev-L)
+    high_low = df["High"].shift(1) - df["Low"].shift(1)
+    high_close_prev = abs(df["High"].shift(1) - df["Close"].shift(2))
+    low_close_prev = abs(df["Low"].shift(1) - df["Close"].shift(2))
+    true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    
+    # Calculate multiple ATR periods using RMA (Wilder's smoothing)
+    # RMA formula: RMA = (previous_RMA * (period-1) + current_value) / period
+    def calculate_rma(series, period):
+        """Calculate RMA (Wilder's smoothing) for ATR"""
+        alpha = 1.0 / period
+        rma = series.ewm(alpha=alpha, adjust=False).mean()
+        return rma
+    
+    # ATR with different periods using RMA
+    df["ATR_5"] = calculate_rma(true_range, 5)
+    df["ATR_10"] = calculate_rma(true_range, 10)
+    df["ATR_14"] = calculate_rma(true_range, 14)  # Traditional ATR period
+    df["ATR_15"] = calculate_rma(true_range, 15)
+    df["ATR_20"] = calculate_rma(true_range, 20)
+    
+    # Keep the original ATR for backward compatibility (using ATR_14)
+    df["ATR"] = df["ATR_14"]
     
     
     # Market Correlation Analysis (using only past data)

@@ -26,7 +26,7 @@ DEFAULT_MIN_HOLDING_PERIOD = 8
 DEFAULT_MAX_HOLDING_PERIOD = 9
 DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
 DEFAULT_MAX_CONCURRENT_TRADES = 3
-DEFAULT_WINDOW_SIZE = 200
+DEFAULT_WINDOW_SIZE = 5000
 DEFAULT_RETREIN_INTERVAL = 15
 
 # Fixed parameters
@@ -295,7 +295,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Calculate stop loss and take profit based on ATR and risk_reward_ratio
                     # Use ATR for dynamic stop loss calculation
                     atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
-                    atr_multiplier = 2.0  # Use 2x ATR for stop loss distance
+                    atr_multiplier = 1.5  # Use 2x ATR for stop loss distance
                     stop_loss_distance = atr_value * atr_multiplier
                     stop_loss = entry_price - stop_loss_distance
                     take_profit = entry_price + (stop_loss_distance * risk_reward_ratio)
