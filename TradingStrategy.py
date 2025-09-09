@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import optuna
 import json
+import math
 from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
@@ -30,7 +31,7 @@ DEFAULT_WINDOW_SIZE = 5000
 DEFAULT_RETREIN_INTERVAL = 15
 
 # Fixed parameters
-INITIAL_CAPITAL = 505
+INITIAL_CAPITAL = 500
 SLIPPAGE = 0.001
 TRANSACTION_FEE = 0.0
 
@@ -43,6 +44,7 @@ RESUME_STUDY = True  # Set to True to resume from previous study, False to start
 
 MIN_WINDOW = 100#300
 MAX_WINDOW = 5000#20000
+EQUITY_CURVE_PHASES = 9
 
 if USE_FAPT:
 
@@ -85,7 +87,9 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     holdout_predictions = []
     holdout_actuals = []
     rolling_metrics = []
-    equity_curve = pd.Series(index=df_window['Date'], data=INITIAL_CAPITAL, dtype=np.float64)
+    # Initialize equity curve only for the trading period (after initial training window)
+    trading_start_idx = window_size
+    equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=INITIAL_CAPITAL, dtype=np.float64)
     
     n = len(df_window)
     
@@ -326,8 +330,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         'profit': None
                     })
             
-            # Update equity curve
-            equity_curve.iloc[idx] = np.float64(capital)
+            # Update equity curve (adjust index for trading period only)
+            equity_curve.iloc[idx - trading_start_idx] = np.float64(capital)
     
     # Close any remaining open trades
     for trade in open_trades:
@@ -339,6 +343,10 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         trade['profit'] = profit
         capital += profit
         trade_history.append(trade)
+    
+    # Update final equity curve value
+    if len(equity_curve) > 0:
+        equity_curve.iloc[-1] = np.float64(capital)
     
     # Calculate performance metrics
     results_df = pd.DataFrame(trade_history)
@@ -408,24 +416,30 @@ def save_top_parameters(study, symbol):
             )
             
             # Plot and save equity curve phases for this trial
-            plt.figure(figsize=(15, 10))
+            # Adjust figure size based on number of phases
+            cols = math.ceil(math.sqrt(EQUITY_CURVE_PHASES))
+            rows = math.ceil(EQUITY_CURVE_PHASES / cols)
+            plt.figure(figsize=(cols * 4, rows * 3))
             
-            # Split the timeline into 4 phases
+            # Split the timeline into EQUITY_CURVE_PHASES phases
             total_points = len(equity_curve)
-            phase_size = total_points // 4
+            phase_size = total_points // EQUITY_CURVE_PHASES
             
             # Create subplots for each phase
-            for j in range(4):
+            for j in range(EQUITY_CURVE_PHASES):
                 start_idx = j * phase_size
-                end_idx = (j + 1) * phase_size if j < 3 else total_points
+                end_idx = (j + 1) * phase_size if j < EQUITY_CURVE_PHASES - 1 else total_points
                 
-                plt.subplot(2, 2, j + 1)
+                plt.subplot(rows, cols, j + 1)
                 phase_data = equity_curve.iloc[start_idx:end_idx]
                 plt.plot(phase_data.index, phase_data.values)
                 plt.title(f'Phase {j + 1} Equity Curve')
                 plt.xlabel('Date')
                 plt.ylabel('Capital ($)')
                 plt.grid(True)
+                # Make x-axis dates smaller to prevent overlapping
+                plt.xticks(rotation=45, fontsize=8)
+                plt.tick_params(axis='x', labelsize=8)
                 
                 # Add phase statistics
                 phase_returns = phase_data.pct_change().dropna()
@@ -544,13 +558,17 @@ def objective(trial):
 
 if __name__ == "__main__":
     # Load and prepare data
-    data_path = f"DB/{symbol}_15min_indicators.csv"
+    data_path = f"DB/{symbol}_fifteenminute_indicators.csv"
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     #Filter data by time range
     start_date = '2025-01-15'  # Format: 'YYYY-MM-DD'
-    # end_date = '2025-04-15'    # Format: 'YYYY-MM-DD'
-    df = df[(df['Date'] >= start_date)]# & (df['Date'] <= end_date)]
+    end_date = '2025-03-31'    # Format: 'YYYY-MM-DD'
+
+    #Every bar is 15 minutes, so 5000 bars is 1250 hours, so 50 days
+    #Calculate number of days from window_size
+    buffered_start_date = pd.to_datetime(start_date) - pd.Timedelta(days=DEFAULT_WINDOW_SIZE*15/60/24)
+    df = df[(df['Date'] >= buffered_start_date) & (df['Date'] <= end_date)]
     
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:
@@ -746,24 +764,30 @@ if __name__ == "__main__":
     print(f"Composite Score: {best_params['composite_score']:.2f}")
 
     # Plot best equity curve
-    plt.figure(figsize=(15, 10))
+    # Adjust figure size based on number of phases
+    cols = math.ceil(math.sqrt(EQUITY_CURVE_PHASES))
+    rows = math.ceil(EQUITY_CURVE_PHASES / cols)
+    plt.figure(figsize=(cols * 4, rows * 3))
 
-    # Split the timeline into 4 phases
+    # Split the timeline into EQUITY_CURVE_PHASES phases
     total_points = len(best_params['equity_curve'])
-    phase_size = total_points // 4
+    phase_size = total_points // EQUITY_CURVE_PHASES
 
     # Create subplots for each phase
-    for i in range(4):
+    for i in range(EQUITY_CURVE_PHASES):
         start_idx = i * phase_size
-        end_idx = (i + 1) * phase_size if i < 3 else total_points
+        end_idx = (i + 1) * phase_size if i < EQUITY_CURVE_PHASES - 1 else total_points
         
-        plt.subplot(2, 2, i + 1)
+        plt.subplot(rows, cols, i + 1)
         phase_data = best_params['equity_curve'].iloc[start_idx:end_idx]
         plt.plot(phase_data.index, phase_data.values)
         plt.title(f'Phase {i + 1} Equity Curve')
         plt.xlabel('Date')
         plt.ylabel('Capital ($)')
         plt.grid(True)
+        # Make x-axis dates smaller to prevent overlapping
+        plt.xticks(rotation=45, fontsize=8)
+        plt.tick_params(axis='x', labelsize=8)
         
         # Add phase statistics
         phase_returns = phase_data.pct_change().dropna()
@@ -783,6 +807,9 @@ if __name__ == "__main__":
     plt.xlabel('Date')
     plt.ylabel('Capital ($)')
     plt.grid(True)
+    # Make x-axis dates smaller to prevent overlapping
+    plt.xticks(rotation=45, fontsize=8)
+    plt.tick_params(axis='x', labelsize=8)
     plt.tight_layout()
     plt.savefig('DB/charts/best_equity_curve_full.png')
     print("Full equity curve saved to DB/charts/best_equity_curve_full.png")

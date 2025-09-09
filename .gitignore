@@ -7,3 +7,4 @@ __pycache__/
 *.pywz
 DB/*
 .env
+settings/cdp_api_key.json

@@ -7,6 +7,7 @@ import os
 from typing import List, Dict, Optional
 import logging
 from coinbase.rest import RESTClient
+from GatherData import calculate_technical_indicators
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -383,7 +384,8 @@ class CoinbaseDataPuller:
             candles_data: List of candle objects from Coinbase SDK
             
         Returns:
-            DataFrame with columns: Date, Open, High, Low, Close, Volume
+            DataFrame with columns: timestamp, Open, High, Low, Close, Volume
+            where timestamp is formatted as 'YYYY-MM-DD HH:MM:SS'
         """
         if not candles_data:
             return pd.DataFrame()
@@ -441,14 +443,14 @@ class CoinbaseDataPuller:
         if df['timestamp'].dtype == 'object':
             # If timestamp is a string, try to parse as ISO or convert to int
             try:
-                df['Date'] = pd.to_datetime(df['timestamp'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
             except:
                 # Try converting string to int then to datetime
                 df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-                df['Date'] = pd.to_datetime(df['timestamp'], unit='s')
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         else:
             # If timestamp is numeric, assume it's Unix timestamp
-            df['Date'] = pd.to_datetime(df['timestamp'], unit='s')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         
         # Convert string values to float
         numeric_columns = ['low', 'high', 'open', 'close', 'volume']
@@ -461,20 +463,24 @@ class CoinbaseDataPuller:
             'high': 'High',
             'low': 'Low',
             'close': 'Close',
-            'volume': 'Volume'
+            'volume': 'Volume',
+            'timestamp': 'timestamp'
         })
         
-        # Select and reorder columns
-        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
+        # Format timestamp as 'YYYY-MM-DD HH:MM:SS' and make it the first column
+        df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
         
-        # Sort by date
-        df = df.sort_values('Date').reset_index(drop=True)
+        # Select and reorder columns with timestamp first
+        df = df[['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']]
+        
+        # Sort by timestamp
+        df = df.sort_values('timestamp').reset_index(drop=True)
         
         return df
     
     def save_data(self, df: pd.DataFrame, product_id: str, granularity: str = 'FIFTEEN_MINUTE'):
         """
-        Save the data to a CSV file.
+        Save the data to a CSV file with technical indicators calculated.
         
         Args:
             df: DataFrame to save
@@ -485,15 +491,53 @@ class CoinbaseDataPuller:
             logger.warning("No data to save")
             return
         
+        # Convert timestamp back to datetime for technical indicator calculations
+        df_with_datetime = df.copy()
+        df_with_datetime['timestamp'] = pd.to_datetime(df_with_datetime['timestamp'])
+        df_with_datetime = df_with_datetime.set_index('timestamp')
+        
+        # Rename columns to match what calculate_technical_indicators expects
+        df_with_datetime = df_with_datetime.rename(columns={
+            'Open': 'Open',
+            'High': 'High', 
+            'Low': 'Low',
+            'Close': 'Close',
+            'Volume': 'Volume'
+        })
+        
+        # Calculate technical indicators
+        logger.info("Calculating technical indicators...")
+        try:
+            # Get granularity in minutes for the timeframe parameter
+            granularity_minutes = self._get_granularity_minutes(granularity)
+            df_with_indicators = calculate_technical_indicators(df_with_datetime, market_data=None, timeframe=granularity_minutes)
+            
+            # Reset index to get timestamp back as a column
+            df_with_indicators = df_with_indicators.reset_index()
+            
+            # Format timestamp as 'YYYY-MM-DD HH:MM:SS' and make it the first column
+            df_with_indicators['timestamp'] = df_with_indicators['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Reorder columns to put timestamp first
+            cols = ['timestamp'] + [col for col in df_with_indicators.columns if col != 'timestamp']
+            df_with_indicators = df_with_indicators[cols]
+            
+            logger.info(f"Technical indicators calculated successfully. New shape: {df_with_indicators.shape}")
+            
+        except Exception as e:
+            logger.error(f"Error calculating technical indicators: {e}")
+            logger.warning("Saving data without technical indicators")
+            df_with_indicators = df
+        
         # Create filename
         granularity_clean = granularity.lower().replace('_', '')
-        filename = f"DB/{product_id.replace('-', '_')}_{granularity_clean}_historical.csv"
+        filename = f"DB/{product_id.replace('-', '_')}_{granularity_clean}_indicators.csv"
         
         # Save to CSV
-        df.to_csv(filename, index=False)
+        df_with_indicators.to_csv(filename, index=False)
         logger.info(f"Data saved to {filename}")
-        logger.info(f"Data shape: {df.shape}")
-        logger.info(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+        logger.info(f"Data shape: {df_with_indicators.shape}")
+        logger.info(f"Date range: {df_with_indicators['timestamp'].min()} to {df_with_indicators['timestamp'].max()}")
         
         return filename
 
@@ -571,7 +615,7 @@ def main():
             pass
         return
     
-    start_date = '2023-07-12'
+    start_date = '2017-05-18'
     end_date = datetime.now().strftime('%Y-%m-%d')
     granularity = 'FIFTEEN_MINUTE'
     
@@ -599,7 +643,7 @@ def main():
             print("="*50)
             print(f"Product: {product_id}")
             print(f"Total candles: {len(df)}")
-            print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+            print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
             print(f"Granularity: {granularity}")
             print(f"Saved to: {filename}")
             print(f"Data shape: {df.shape}")
