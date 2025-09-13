@@ -56,7 +56,7 @@ class CoinbaseAPIClient:
             'max_risk_percentage': 0.15828651179079864,
             'risk_scaling_factor': 2,#1.7429109176364634,#1.6949727011806939,
             'risk_reward_ratio': 2,#1.6037213842177254,
-            'min_predicted_move': 0.005695475106903262,#0.005113433706915217,
+            'min_predicted_move': 0.003695475106903262,#0.005113433706915217,
             'partial_take_profit': 0.8675868861032823,
             'stop_loss_atr_multiplier': 1.5,
             'min_holding_period': 5,

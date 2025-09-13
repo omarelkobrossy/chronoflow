@@ -22,7 +22,7 @@ DEFAULT_MIN_RISK = 0.013278226616841424
 DEFAULT_MAX_RISK = 0.15828651179079864
 DEFAULT_SCALING = 2
 DEFAULT_RR = 2
-DEFAULT_MIN_PREDICTED_MOVE = 0.003695475106903262
+DEFAULT_MIN_PREDICTED_MOVE = 0.005695475106903262
 DEFAULT_MIN_HOLDING_PERIOD = 8
 DEFAULT_MAX_HOLDING_PERIOD = 9
 DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
@@ -38,14 +38,14 @@ TRANSACTION_FEE = 0.0
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = True  # Set to True to use default parameters
+SKIP_OPTIMIZATION = False  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 1200
+OPTIMIZATION_TRIALS = 6000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
 MIN_WINDOW = 300
 MAX_WINDOW = 50000
-EQUITY_CURVE_PHASES = 4
+EQUITY_CURVE_PHASES = 9
 
 if USE_FAPT:
 
@@ -60,21 +60,8 @@ if USE_FAPT:
         market_weather_features[base_feature].append(stat_type)
 
 
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, model_params=None):
     """Run trading strategy with given parameters"""
-    model_params = {
-        'n_estimators': 50,
-        'max_depth': 4,
-        'learning_rate': 0.1,
-        'min_child_weight': 10,
-        'subsample': 0.7,
-        'colsample_bytree': 0.7,
-        'reg_alpha': 0.5,
-        'reg_lambda': 1.0,
-        'random_state': 42,
-        'tree_method': 'hist',
-        'device': 'cpu'
-    }
     
     # Initialize predicted change column
     df_window['Predicted_Change'] = np.nan
@@ -103,6 +90,27 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         save_importance=False,
         visualize_importance=False
     )
+
+    # Use provided model_params or default parameters
+    # if model_params is None:
+    #     model_params = {
+    #         'n_estimators': 50,
+    #         'max_depth': 4,
+    #         'learning_rate': 0.1,
+    #         'min_child_weight': 10,
+    #         'subsample': 0.7,
+    #         'colsample_bytree': 0.7,
+    #         'reg_alpha': 0.5,
+    #         'reg_lambda': 1.0,
+    #         'random_state': 42,
+    #         'tree_method': 'hist',
+    #         'device': 'cpu'
+    #     }
+    
+    # Ensure required parameters are set
+    model_params.setdefault('random_state', 42)
+    model_params.setdefault('tree_method', 'hist')
+    model_params.setdefault('device', 'cpu')
     
     model = xgb.XGBRegressor(**model_params)
     
@@ -413,9 +421,6 @@ def save_top_parameters(study, symbol):
     
     # Add each trial's parameters and metrics
     for i, (trial_num, score, params, attrs) in enumerate(top_10):
-        # Calculate actual window_size and retrain_interval
-        window_size = clamp(int(len(df) * params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-        retrain_interval = max(int(window_size * params['retrain_fraction']), 10)
         
         # Get the equity curve from trial attributes and convert back to Series
         equity_curve_dict = attrs.get('equity_curve')
@@ -465,21 +470,19 @@ def save_top_parameters(study, symbol):
         params_to_save['top_parameters'].append({
             'trial_number': trial_num,
             'score': float(score),
-            'parameters': {
-                'min_risk_percentage': params['min_risk_percentage'],
-                'max_risk_percentage': params['max_risk_percentage'],
-                'risk_scaling_factor': params['risk_scaling_factor'],
-                'risk_reward_ratio': params['risk_reward_ratio'],
-                'min_predicted_move': params['min_predicted_move'],
-                'partial_take_profit': params['partial_take_profit'],
-                'min_holding_period': params['min_holding_period'],
-                'max_holding_period': params['max_holding_period'],
-                'max_concurrent_trades': params['max_concurrent_trades'],
-                'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
-                'window_fraction': params['window_fraction'],
-                'retrain_fraction': params['retrain_fraction'],
-                'calculated_window_size': window_size,
-                'calculated_retrain_interval': retrain_interval
+            'model_parameters': {
+                'learning_rate': params['learning_rate'],
+                'n_estimators': params['n_estimators'],
+                'max_depth': params['max_depth'],
+                'max_leaves': params['max_leaves'],
+                'min_child_weight': params['min_child_weight'],
+                'gamma': params['gamma'],
+                'subsample': params['subsample'],
+                'colsample_bytree': params['colsample_bytree'],
+                'colsample_bylevel': params['colsample_bylevel'],
+                'reg_lambda': params['reg_lambda'],
+                'reg_alpha': params['reg_alpha'],
+                'max_bin': params['max_bin']
             },
             'metrics': {
                 'total_return': attrs.get('total_return', 0.0),
@@ -492,46 +495,50 @@ def save_top_parameters(study, symbol):
     
     # Save to JSON
     os.makedirs('Parameters', exist_ok=True)
-    params_file = f'Parameters/{symbol}_Full_Optimization.json'
+    params_file = f'Parameters/{symbol}_Model_Optimization.json'
     with open(params_file, 'w') as f:
         json.dump(params_to_save, f, indent=4)
     print(f"\nTop 10 parameters saved to {params_file}")
     print(f"Top 10 equity curve phase graphs saved to Visualization folder")
 
 def objective(trial):
-    """Objective function for Optuna optimization"""
-    # Define parameter ranges
-    min_risk = trial.suggest_float('min_risk_percentage', 0.005, 0.02)
-    max_risk = trial.suggest_float('max_risk_percentage', min_risk, min(0.05, min_risk*1.5))
-    scaling_factor = trial.suggest_float('risk_scaling_factor', 1.5, 3.0)
-    reward_ratio = trial.suggest_float('risk_reward_ratio', 1.5, 3.0)
-    min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
-    window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5) # 1% to 50% of the data
-    retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
-    window_size = clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = max(int(window_size * retrain_fraction), 10)
-    partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
-    min_holding_period = trial.suggest_int('min_holding_period', 5, 20)
-    max_holding_period = trial.suggest_int('max_holding_period', min_holding_period, 40)
-    max_concurrent_trades = trial.suggest_int('max_concurrent_trades', 1, 10)
-    stop_loss_atr_multiplier = trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0)
+    """Objective function for Optuna optimization - optimizing XGBoost model parameters"""
+    # Define XGBoost model parameter ranges
+    model_params = {
+        'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.12),
+        'n_estimators': trial.suggest_int('n_estimators', 300, 1200),
+        'max_depth': trial.suggest_int('max_depth', 3, 7),
+        'max_leaves': trial.suggest_int('max_leaves', 32, 128),
+        'min_child_weight': trial.suggest_float('min_child_weight', 0.5, 8.0),
+        'gamma': trial.suggest_float('gamma', 0.0, 4.0),
+        'subsample': trial.suggest_float('subsample', 0.6, 0.95),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 0.9),
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.5, 1.0),
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 5.0),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 2.0),
+        'max_bin': trial.suggest_int('max_bin', 256, 1024),
+        'random_state': 42,
+        'tree_method': 'hist',
+        'device': 'cpu'
+    }
     
-    # Run strategy with current parameters
+    # Run strategy with default trading parameters but optimized model parameters
     metrics = run_strategy(df, 
-                           min_risk, 
-                           max_risk, 
-                           scaling_factor, 
-                           reward_ratio, 
-                           min_predicted_move, 
-                           window_size, 
-                           retrain_interval, 
-                           partial_take_profit, 
-                           min_holding_period, 
-                           max_holding_period, 
-                           max_concurrent_trades,
+                           DEFAULT_MIN_RISK, 
+                           DEFAULT_MAX_RISK, 
+                           DEFAULT_SCALING, 
+                           DEFAULT_RR, 
+                           DEFAULT_MIN_PREDICTED_MOVE, 
+                           DEFAULT_WINDOW_SIZE, 
+                           DEFAULT_RETREIN_INTERVAL, 
+                           DEFAULT_PARTIAL_TAKE_PROFIT, 
+                           DEFAULT_MIN_HOLDING_PERIOD, 
+                           DEFAULT_MAX_HOLDING_PERIOD, 
+                           DEFAULT_MAX_CONCURRENT_TRADES,
                            feature_cols, 
                            target_cols,
-                           stop_loss_atr_multiplier)
+                           DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
+                           model_params)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -585,19 +592,29 @@ if __name__ == "__main__":
     
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:
-        print("\nUsing default parameters (optimization skipped)")
-        print(f"Min Risk: {DEFAULT_MIN_RISK:.3f}")
-        print(f"Max Risk: {DEFAULT_MAX_RISK:.3f}")
-        print(f"Risk Scaling: {DEFAULT_SCALING}")
-        print(f"Risk:Reward: {DEFAULT_RR}")
-        print(f"Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
-        print(f"Partial Take Profit: {DEFAULT_PARTIAL_TAKE_PROFIT:.3f}")
-        print(f"Min Holding Period: {DEFAULT_MIN_HOLDING_PERIOD}")
-        print(f"Max Holding Period: {DEFAULT_MAX_HOLDING_PERIOD}")
-        print(f"Max Concurrent Trades: {DEFAULT_MAX_CONCURRENT_TRADES}")
-        print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
-        print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
-        print(f"Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
+        print("\nUsing default trading parameters and default model parameters (optimization skipped)")
+        print(f"Trading Parameters:")
+        print(f"  Min Risk: {DEFAULT_MIN_RISK:.3f}")
+        print(f"  Max Risk: {DEFAULT_MAX_RISK:.3f}")
+        print(f"  Risk Scaling: {DEFAULT_SCALING}")
+        print(f"  Risk:Reward: {DEFAULT_RR}")
+        print(f"  Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
+        print(f"  Partial Take Profit: {DEFAULT_PARTIAL_TAKE_PROFIT:.3f}")
+        print(f"  Min Holding Period: {DEFAULT_MIN_HOLDING_PERIOD}")
+        print(f"  Max Holding Period: {DEFAULT_MAX_HOLDING_PERIOD}")
+        print(f"  Max Concurrent Trades: {DEFAULT_MAX_CONCURRENT_TRADES}")
+        print(f"  Window Size: {DEFAULT_WINDOW_SIZE}")
+        print(f"  Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
+        print(f"  Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
+        print(f"Model Parameters:")
+        print(f"  Learning Rate: 0.1000")
+        print(f"  N Estimators: 50")
+        print(f"  Max Depth: 4")
+        print(f"  Min Child Weight: 10.00")
+        print(f"  Subsample: 0.700")
+        print(f"  Colsample by Tree: 0.700")
+        print(f"  Reg Alpha: 0.50")
+        print(f"  Reg Lambda: 1.00")
         best_metrics = run_strategy(df, 
                                     DEFAULT_MIN_RISK,
                                     DEFAULT_MAX_RISK, 
@@ -612,7 +629,8 @@ if __name__ == "__main__":
                                     DEFAULT_MAX_CONCURRENT_TRADES,
                                     feature_cols,
                                     target_cols,
-                                    DEFAULT_STOP_LOSS_ATR_MULTIPLIER)
+                                    DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
+                                    None)  # Use default model parameters
         
         # Calculate composite score
         composite_score = (
@@ -621,19 +639,34 @@ if __name__ == "__main__":
             np.sqrt(best_metrics['win_rate'] / 100)
         )
         
+        # Default model parameters
+        default_model_params = {
+            'n_estimators': 50,
+            'max_depth': 4,
+            'learning_rate': 0.1,
+            'min_child_weight': 10,
+            'subsample': 0.7,
+            'colsample_bytree': 0.7,
+            'reg_alpha': 0.5,
+            'reg_lambda': 1.0,
+            'random_state': 42,
+            'tree_method': 'hist',
+            'device': 'cpu'
+        }
+        
         results = [{
-            'min_risk_percentage': DEFAULT_MIN_RISK,
-            'max_risk_percentage': DEFAULT_MAX_RISK,
-            'risk_scaling_factor': DEFAULT_SCALING,
-            'risk_reward_ratio': DEFAULT_RR,
-            'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
-            'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
-            'window_size': DEFAULT_WINDOW_SIZE,
-            'retrain_interval': DEFAULT_RETREIN_INTERVAL,
-            'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
-            'min_holding_period': DEFAULT_MIN_HOLDING_PERIOD,
-            'max_holding_period': DEFAULT_MAX_HOLDING_PERIOD,
-            'max_concurrent_trades': DEFAULT_MAX_CONCURRENT_TRADES,
+            'learning_rate': default_model_params['learning_rate'],
+            'n_estimators': default_model_params['n_estimators'],
+            'max_depth': default_model_params['max_depth'],
+            'max_leaves': 0,  # Default value
+            'min_child_weight': default_model_params['min_child_weight'],
+            'gamma': 0.0,  # Default value
+            'subsample': default_model_params['subsample'],
+            'colsample_bytree': default_model_params['colsample_bytree'],
+            'colsample_bylevel': 1.0,  # Default value
+            'reg_lambda': default_model_params['reg_lambda'],
+            'reg_alpha': default_model_params['reg_alpha'],
+            'max_bin': 256,  # Default value
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
             'sharpe_ratio': best_metrics['sharpe_ratio'],
@@ -645,21 +678,22 @@ if __name__ == "__main__":
             'trade_history': best_metrics['trade_history']
         }]
     else:
-        print("\nRunning Optuna optimization...")
+        print("\nRunning Optuna optimization for XGBoost model parameters...")
         
         # Create storage for the study
-        storage_name = f"sqlite:///DB/{symbol}_study.db"
+        storage_name = f"sqlite:///DB/{symbol}_model_study.db"
         
         # Handle study resumption
+        study_name = f"{symbol}_model_optimization"
         if RESUME_STUDY is None:
             # Check if study exists
             try:
-                study = optuna.load_study(study_name=symbol, storage=storage_name)
+                study = optuna.load_study(study_name=study_name, storage=storage_name)
                 print(f"\nFound existing study with {len(study.trials)} trials. Resuming...")
             except:
                 print("\nNo existing study found. Starting new study...")
                 study = optuna.create_study(
-                    study_name=symbol,
+                    study_name=study_name,
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
@@ -667,12 +701,12 @@ if __name__ == "__main__":
                 )
         elif RESUME_STUDY:
             try:
-                study = optuna.load_study(study_name=symbol, storage=storage_name)
+                study = optuna.load_study(study_name=study_name, storage=storage_name)
                 print(f"\nResuming existing study with {len(study.trials)} trials...")
             except:
                 print("\nNo existing study found. Starting new study...")
                 study = optuna.create_study(
-                    study_name=symbol,
+                    study_name=study_name,
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
@@ -681,7 +715,7 @@ if __name__ == "__main__":
         else:
             print("\nStarting new study...")
             study = optuna.create_study(
-                study_name=symbol,
+                study_name=study_name,
                 storage=storage_name,
                 direction='maximize',
                 sampler=optuna.samplers.TPESampler(seed=42),
@@ -700,26 +734,43 @@ if __name__ == "__main__":
         
         # Get best parameters
         best_params = study.best_params
-        # Calculate actual window_size and retrain_interval from fractions
-        window_size = clamp(int(len(df) * best_params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-        retrain_interval = max(int(window_size * best_params['retrain_fraction']), 10)
+        
+        # Create model parameters from best_params
+        best_model_params = {
+            'learning_rate': best_params['learning_rate'],
+            'n_estimators': best_params['n_estimators'],
+            'max_depth': best_params['max_depth'],
+            'max_leaves': best_params['max_leaves'],
+            'min_child_weight': best_params['min_child_weight'],
+            'gamma': best_params['gamma'],
+            'subsample': best_params['subsample'],
+            'colsample_bytree': best_params['colsample_bytree'],
+            'colsample_bylevel': best_params['colsample_bylevel'],
+            'reg_lambda': best_params['reg_lambda'],
+            'reg_alpha': best_params['reg_alpha'],
+            'max_bin': best_params['max_bin'],
+            'random_state': 42,
+            'tree_method': 'hist',
+            'device': 'cpu'
+        }
         
         best_metrics = run_strategy(
             df,
-            best_params['min_risk_percentage'],
-            best_params['max_risk_percentage'],
-            best_params['risk_scaling_factor'],
-            best_params['risk_reward_ratio'],
-            best_params['min_predicted_move'],
-            window_size,
-            retrain_interval,
-            best_params['partial_take_profit'],
-            best_params['min_holding_period'],
-            best_params['max_holding_period'],
-            best_params['max_concurrent_trades'],
+            DEFAULT_MIN_RISK,
+            DEFAULT_MAX_RISK,
+            DEFAULT_SCALING,
+            DEFAULT_RR,
+            DEFAULT_MIN_PREDICTED_MOVE,
+            DEFAULT_WINDOW_SIZE,
+            DEFAULT_RETREIN_INTERVAL,
+            DEFAULT_PARTIAL_TAKE_PROFIT,
+            DEFAULT_MIN_HOLDING_PERIOD,
+            DEFAULT_MAX_HOLDING_PERIOD,
+            DEFAULT_MAX_CONCURRENT_TRADES,
             feature_cols,
             target_cols,
-            best_params['stop_loss_atr_multiplier']
+            DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
+            best_model_params
         )
         
         # Calculate final composite score
@@ -730,20 +781,18 @@ if __name__ == "__main__":
         )
         
         results = [{
-            'min_risk_percentage': best_params['min_risk_percentage'],
-            'max_risk_percentage': best_params['max_risk_percentage'],
-            'risk_scaling_factor': best_params['risk_scaling_factor'],
-            'risk_reward_ratio': best_params['risk_reward_ratio'],
-            'min_predicted_move': best_params['min_predicted_move'],
-            'window_fraction': best_params['window_fraction'],
-            'retrain_fraction': best_params['retrain_fraction'],
-            'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
-            'window_size': window_size,
-            'retrain_interval': retrain_interval,
-            'partial_take_profit': best_params['partial_take_profit'],
-            'min_holding_period': best_params['min_holding_period'],
-            'max_holding_period': best_params['max_holding_period'],
-            'max_concurrent_trades': best_params['max_concurrent_trades'],
+            'learning_rate': best_params['learning_rate'],
+            'n_estimators': best_params['n_estimators'],
+            'max_depth': best_params['max_depth'],
+            'max_leaves': best_params['max_leaves'],
+            'min_child_weight': best_params['min_child_weight'],
+            'gamma': best_params['gamma'],
+            'subsample': best_params['subsample'],
+            'colsample_bytree': best_params['colsample_bytree'],
+            'colsample_bylevel': best_params['colsample_bylevel'],
+            'reg_lambda': best_params['reg_lambda'],
+            'reg_alpha': best_params['reg_alpha'],
+            'max_bin': best_params['max_bin'],
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
             'sharpe_ratio': best_metrics['sharpe_ratio'],
@@ -760,19 +809,19 @@ if __name__ == "__main__":
 
     # Get best parameters
     best_params = results_df.iloc[0]
-    print("\nBest Parameters:")
-    print(f"Min Risk: {best_params['min_risk_percentage']:.3f}")
-    print(f"Max Risk: {best_params['max_risk_percentage']:.3f}")
-    print(f"Risk Scaling: {best_params['risk_scaling_factor']:.2f}")
-    print(f"Risk:Reward: {best_params['risk_reward_ratio']:.2f}")
-    print(f"Min Predicted Move: {best_params['min_predicted_move']:.3f}")
-    print(f"Stop Loss ATR Multiplier: {best_params['stop_loss_atr_multiplier']:.2f}")
-    print(f"Window Size: {best_params['window_size']}")
-    print(f"Retrain Interval: {best_params['retrain_interval']}")
-    print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")
-    print(f"Min Holding Period: {best_params['min_holding_period']}")
-    print(f"Max Holding Period: {best_params['max_holding_period']}")
-    print(f"Max Concurrent Trades: {best_params['max_concurrent_trades']}")
+    print("\nBest Model Parameters:")
+    print(f"Learning Rate: {best_params['learning_rate']:.4f}")
+    print(f"N Estimators: {best_params['n_estimators']}")
+    print(f"Max Depth: {best_params['max_depth']}")
+    print(f"Max Leaves: {best_params['max_leaves']}")
+    print(f"Min Child Weight: {best_params['min_child_weight']:.2f}")
+    print(f"Gamma: {best_params['gamma']:.2f}")
+    print(f"Subsample: {best_params['subsample']:.3f}")
+    print(f"Colsample by Tree: {best_params['colsample_bytree']:.3f}")
+    print(f"Colsample by Level: {best_params['colsample_bylevel']:.3f}")
+    print(f"Reg Lambda: {best_params['reg_lambda']:.2f}")
+    print(f"Reg Alpha: {best_params['reg_alpha']:.2f}")
+    print(f"Max Bin: {best_params['max_bin']}")
     print(f"\nPerformance Metrics:")
     print(f"Total Return: {best_params['total_return']:.2f}%")
     print(f"Final Capital: ${best_params['final_capital']:,.2f}")
@@ -816,13 +865,13 @@ if __name__ == "__main__":
                 transform=plt.gca().transAxes, verticalalignment='top')
 
     plt.tight_layout()
-    plt.savefig('DB/charts/best_equity_curve_phases.png')
-    print("\nPhase-wise equity curves saved to DB/charts/best_equity_curve_phases.png")
+    plt.savefig('DB/charts/best_model_equity_curve_phases.png')
+    print("\nPhase-wise equity curves saved to DB/charts/best_model_equity_curve_phases.png")
 
     # Also save the original full equity curve
     plt.figure(figsize=(12, 6))
     plt.plot(best_params['equity_curve'].index, best_params['equity_curve'].values)
-    plt.title('Best Parameter Set Equity Curve (Full Timeline)')
+    plt.title('Best Model Parameters Equity Curve (Full Timeline)')
     plt.xlabel('Date')
     plt.ylabel('Capital ($)')
     plt.grid(True)
@@ -830,12 +879,12 @@ if __name__ == "__main__":
     plt.xticks(rotation=45, fontsize=8)
     plt.tick_params(axis='x', labelsize=8)
     plt.tight_layout()
-    plt.savefig('DB/charts/best_equity_curve_full.png')
-    print("Full equity curve saved to DB/charts/best_equity_curve_full.png")
+    plt.savefig('DB/charts/best_model_equity_curve_full.png')
+    print("Full equity curve saved to DB/charts/best_model_equity_curve_full.png")
 
     # Save results
-    results_df.to_csv('DB/parameter_optimization_results.csv', index=False)
-    best_params['trade_history'].to_csv('DB/best_parameter_trade_history.csv', index=False)
-    print("\nResults saved to DB/parameter_optimization_results.csv")
-    print("Best trade history saved to DB/best_parameter_trade_history.csv")
+    results_df.to_csv('DB/model_optimization_results.csv', index=False)
+    best_params['trade_history'].to_csv('DB/best_model_trade_history.csv', index=False)
+    print("\nResults saved to DB/model_optimization_results.csv")
+    print("Best trade history saved to DB/best_model_trade_history.csv")
 

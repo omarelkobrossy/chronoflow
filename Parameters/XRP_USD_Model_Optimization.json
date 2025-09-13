@@ -1,0 +1,255 @@
+{
+    "optimization_date": "2025-09-13 16:35:59",
+    "top_parameters": [
+        {
+            "trial_number": 213,
+            "score": 145.30802338322985,
+            "model_parameters": {
+                "learning_rate": 0.02677309768894484,
+                "n_estimators": 1138,
+                "max_depth": 7,
+                "max_leaves": 94,
+                "min_child_weight": 4.206638777172816,
+                "gamma": 0.008956810855195101,
+                "subsample": 0.7598874093209762,
+                "colsample_bytree": 0.7414991482439783,
+                "colsample_bylevel": 0.6989625699485557,
+                "reg_lambda": 3.822045000406456,
+                "reg_alpha": 0.3746741976726396,
+                "max_bin": 937
+            },
+            "metrics": {
+                "total_return": 14530.802338322985,
+                "sharpe_ratio": 0.4236741469740057,
+                "win_rate": 57.63293310463122,
+                "max_drawdown": -99.99999879803035,
+                "trade_count": 583
+            }
+        },
+        {
+            "trial_number": 402,
+            "score": 143.93530770735467,
+            "model_parameters": {
+                "learning_rate": 0.04372236306072669,
+                "n_estimators": 1179,
+                "max_depth": 7,
+                "max_leaves": 94,
+                "min_child_weight": 5.151962412711924,
+                "gamma": 0.010700957673473715,
+                "subsample": 0.77380044642945,
+                "colsample_bytree": 0.684100129175983,
+                "colsample_bylevel": 0.6262946183374365,
+                "reg_lambda": 3.5258839075324393,
+                "reg_alpha": 0.1600646199094525,
+                "max_bin": 951
+            },
+            "metrics": {
+                "total_return": 14393.530770735466,
+                "sharpe_ratio": 0.7723537100666212,
+                "win_rate": 57.41379310344827,
+                "max_drawdown": -99.99999357296664,
+                "trade_count": 580
+            }
+        },
+        {
+            "trial_number": 443,
+            "score": 142.12985855012246,
+            "model_parameters": {
+                "learning_rate": 0.04241630324487278,
+                "n_estimators": 1071,
+                "max_depth": 7,
+                "max_leaves": 89,
+                "min_child_weight": 5.196832372480287,
+                "gamma": 0.0011276246533829838,
+                "subsample": 0.7735527090686539,
+                "colsample_bytree": 0.6702234203674379,
+                "colsample_bylevel": 0.638408376937329,
+                "reg_lambda": 3.172506984716476,
+                "reg_alpha": 0.13642411405533517,
+                "max_bin": 995
+            },
+            "metrics": {
+                "total_return": 14212.985855012246,
+                "sharpe_ratio": 0.8444605725038171,
+                "win_rate": 55.1829268292683,
+                "max_drawdown": -99.99999428577716,
+                "trade_count": 656
+            }
+        },
+        {
+            "trial_number": 163,
+            "score": 138.571446258445,
+            "model_parameters": {
+                "learning_rate": 0.03787418958922426,
+                "n_estimators": 1081,
+                "max_depth": 7,
+                "max_leaves": 95,
+                "min_child_weight": 4.293040547883602,
+                "gamma": 0.014561782418412227,
+                "subsample": 0.7684206145505799,
+                "colsample_bytree": 0.7130528494928058,
+                "colsample_bylevel": 0.6644809237309527,
+                "reg_lambda": 4.163274602414711,
+                "reg_alpha": 0.28516151594649203,
+                "max_bin": 958
+            },
+            "metrics": {
+                "total_return": 13857.144625844501,
+                "sharpe_ratio": 0.5503797757798964,
+                "win_rate": 58.707360861759426,
+                "max_drawdown": -99.99999547757132,
+                "trade_count": 557
+            }
+        },
+        {
+            "trial_number": 261,
+            "score": 138.11147190930208,
+            "model_parameters": {
+                "learning_rate": 0.028059773757216484,
+                "n_estimators": 1091,
+                "max_depth": 7,
+                "max_leaves": 102,
+                "min_child_weight": 4.69943610252003,
+                "gamma": 0.00010020924592124211,
+                "subsample": 0.7490427795243699,
+                "colsample_bytree": 0.6997070748278812,
+                "colsample_bylevel": 0.6467046598394167,
+                "reg_lambda": 3.7662616075482416,
+                "reg_alpha": 0.27192313998744977,
+                "max_bin": 922
+            },
+            "metrics": {
+                "total_return": 13811.147190930209,
+                "sharpe_ratio": 0.7853101927916407,
+                "win_rate": 54.86725663716814,
+                "max_drawdown": -99.99999274506077,
+                "trade_count": 678
+            }
+        },
+        {
+            "trial_number": 376,
+            "score": 137.6659190669493,
+            "model_parameters": {
+                "learning_rate": 0.04010751969762487,
+                "n_estimators": 1085,
+                "max_depth": 7,
+                "max_leaves": 106,
+                "min_child_weight": 3.114465534662609,
+                "gamma": 0.004945958715721414,
+                "subsample": 0.7836429632921053,
+                "colsample_bytree": 0.6592571112553908,
+                "colsample_bylevel": 0.6393084917648468,
+                "reg_lambda": 3.6101183357522157,
+                "reg_alpha": 0.407524522260768,
+                "max_bin": 947
+            },
+            "metrics": {
+                "total_return": 13766.59190669493,
+                "sharpe_ratio": 0.4626802567135933,
+                "win_rate": 56.29139072847682,
+                "max_drawdown": -99.99999750241008,
+                "trade_count": 604
+            }
+        },
+        {
+            "trial_number": 175,
+            "score": 136.61019655217225,
+            "model_parameters": {
+                "learning_rate": 0.030753050126677613,
+                "n_estimators": 1069,
+                "max_depth": 7,
+                "max_leaves": 86,
+                "min_child_weight": 4.589316866693228,
+                "gamma": 0.013466735984628811,
+                "subsample": 0.7240918329527913,
+                "colsample_bytree": 0.6969024425566499,
+                "colsample_bylevel": 0.6323676292069352,
+                "reg_lambda": 4.158066925898786,
+                "reg_alpha": 0.36493445602332886,
+                "max_bin": 996
+            },
+            "metrics": {
+                "total_return": 13661.019655217226,
+                "sharpe_ratio": 0.5159043064911129,
+                "win_rate": 57.801418439716315,
+                "max_drawdown": -99.99999700462128,
+                "trade_count": 564
+            }
+        },
+        {
+            "trial_number": 378,
+            "score": 136.28119911561842,
+            "model_parameters": {
+                "learning_rate": 0.0395799252866837,
+                "n_estimators": 1102,
+                "max_depth": 7,
+                "max_leaves": 109,
+                "min_child_weight": 4.224798197948551,
+                "gamma": 6.259485702062289e-05,
+                "subsample": 0.7780470984561656,
+                "colsample_bytree": 0.6518368350482061,
+                "colsample_bylevel": 0.6676512759861467,
+                "reg_lambda": 3.606261928989557,
+                "reg_alpha": 0.3865459932620588,
+                "max_bin": 963
+            },
+            "metrics": {
+                "total_return": 13628.119911561842,
+                "sharpe_ratio": 0.965540418472673,
+                "win_rate": 55.00000000000001,
+                "max_drawdown": -99.99999928717213,
+                "trade_count": 680
+            }
+        },
+        {
+            "trial_number": 406,
+            "score": 134.97555663232635,
+            "model_parameters": {
+                "learning_rate": 0.04390507616824117,
+                "n_estimators": 1181,
+                "max_depth": 7,
+                "max_leaves": 89,
+                "min_child_weight": 5.090172989520765,
+                "gamma": 0.0030205519024015188,
+                "subsample": 0.7813633940815616,
+                "colsample_bytree": 0.6734477809416497,
+                "colsample_bylevel": 0.6054320908601374,
+                "reg_lambda": 3.307812021841029,
+                "reg_alpha": 0.0798340644351104,
+                "max_bin": 1009
+            },
+            "metrics": {
+                "total_return": 13497.555663232635,
+                "sharpe_ratio": 0.7066794362836326,
+                "win_rate": 56.22950819672131,
+                "max_drawdown": -99.99999243201759,
+                "trade_count": 610
+            }
+        },
+        {
+            "trial_number": 296,
+            "score": 134.27088104931934,
+            "model_parameters": {
+                "learning_rate": 0.03182169137731208,
+                "n_estimators": 1176,
+                "max_depth": 7,
+                "max_leaves": 107,
+                "min_child_weight": 3.3264181184505714,
+                "gamma": 0.0004011891989475941,
+                "subsample": 0.6780613077365201,
+                "colsample_bytree": 0.6714734044770853,
+                "colsample_bylevel": 0.6588615084968,
+                "reg_lambda": 3.7364410006896125,
+                "reg_alpha": 0.27487780929395017,
+                "max_bin": 873
+            },
+            "metrics": {
+                "total_return": 13427.088104931934,
+                "sharpe_ratio": 0.7534445894400643,
+                "win_rate": 55.01519756838906,
+                "max_drawdown": -99.99999281777372,
+                "trade_count": 658
+            }
+        }
+    ]
+}
