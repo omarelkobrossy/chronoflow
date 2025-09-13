@@ -38,7 +38,7 @@ class CoinbaseAPIClient:
         self.client = None
         self.model = None
         self.current_features = None
-        self.window_size = 5000
+        self.window_size = 25000
         
         # In-memory data storage
         self.historical_data = pd.DataFrame()  # Full historical dataset with indicators
@@ -52,12 +52,13 @@ class CoinbaseAPIClient:
         self.last_retrain_time = None
         self.last_update_time = None
         self.trading_params = {
-            'min_risk_percentage': 0.008896723760156468,
-            'max_risk_percentage': 0.013279057376573214,
-            'risk_scaling_factor': 1.7429109176364634,#1.6949727011806939,
-            'risk_reward_ratio': 3,#1.6037213842177254,
-            'min_predicted_move': 0.003113433706915217,#0.005113433706915217,
-            'partial_take_profit': 0.7182278203996404,
+            'min_risk_percentage': 0.013278226616841424,
+            'max_risk_percentage': 0.15828651179079864,
+            'risk_scaling_factor': 2,#1.7429109176364634,#1.6949727011806939,
+            'risk_reward_ratio': 2,#1.6037213842177254,
+            'min_predicted_move': 0.005695475106903262,#0.005113433706915217,
+            'partial_take_profit': 0.8675868861032823,
+            'stop_loss_atr_multiplier': 1.5,
             'min_holding_period': 5,
             'max_holding_period': 6,
             'max_concurrent_trades': 8
@@ -705,10 +706,12 @@ class CoinbaseAPIClient:
             risk_amount = self.capital * risk_percentage
             
             # Calculate stop loss and take profit based on risk_reward_ratio only
-            # Use a fixed percentage for stop loss, then calculate take profit based on risk_reward_ratio
-            stop_loss_percentage = 0.01  # 1% stop loss from entry price
-            stop_loss = entry_price * (1 - stop_loss_percentage)
-            take_profit = entry_price * (1 + (stop_loss_percentage * self.trading_params['risk_reward_ratio']))
+            # Use ATR for dynamic stop loss calculation
+            atr_value = row['ATR'] if 'ATR' in row else entry_price * 0.01  # Fallback to 1% if ATR not available
+            atr_multiplier = self.trading_params['stop_loss_atr_multiplier']
+            stop_loss_distance = atr_value * atr_multiplier
+            stop_loss = entry_price - stop_loss_distance
+            take_profit = entry_price + (stop_loss_distance * self.trading_params['risk_reward_ratio'])
             risk_per_share = entry_price - stop_loss
             
             if risk_per_share <= 0 or np.isnan(risk_per_share):
@@ -932,7 +935,7 @@ class CoinbaseAPIClient:
             print(f"Target: {total_bars_needed:,} bars ({self.years_of_data} years of 15-minute data)")
             
             # Coinbase API limit is 350 bars per request
-            max_bars_per_request = 300  # Use 300 to be safe
+            max_bars_per_request = 350  # Use 350 to be safe
             requests_needed = (total_bars_needed // max_bars_per_request) + 1
             
             print(f"Will need approximately {requests_needed} API requests")
@@ -1697,7 +1700,7 @@ def main():
     
     # Initialize Coinbase API client with 2 years of historical data
     print("Initializing API client with historical data loading...")
-    years_data = 1#input("Enter number of years of historical data to load (default 2): ").strip()
+    years_data = 6#input("Enter number of years of historical data to load (default 2): ").strip()
     try:
         years_data = float(years_data) if years_data else 2.0
     except ValueError:

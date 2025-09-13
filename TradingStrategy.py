@@ -18,20 +18,21 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.006489884911079899
-DEFAULT_MAX_RISK = 0.109567915879945087
-DEFAULT_SCALING = 1.6949727011806939
-DEFAULT_RR = 1.6037213842177254
-DEFAULT_MIN_PREDICTED_MOVE = 0.005113433706915217
+DEFAULT_MIN_RISK = 0.013278226616841424
+DEFAULT_MAX_RISK = 0.15828651179079864
+DEFAULT_SCALING = 2
+DEFAULT_RR = 2
+DEFAULT_MIN_PREDICTED_MOVE = 0.005695475106903262
 DEFAULT_MIN_HOLDING_PERIOD = 8
 DEFAULT_MAX_HOLDING_PERIOD = 9
 DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
-DEFAULT_MAX_CONCURRENT_TRADES = 3
-DEFAULT_WINDOW_SIZE = 5000
+DEFAULT_MAX_CONCURRENT_TRADES = 8
+DEFAULT_WINDOW_SIZE = 25000
 DEFAULT_RETREIN_INTERVAL = 15
+DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 1.5
 
 # Fixed parameters
-INITIAL_CAPITAL = 500
+INITIAL_CAPITAL = 2000
 SLIPPAGE = 0.001
 TRANSACTION_FEE = 0.0
 
@@ -39,11 +40,11 @@ TRANSACTION_FEE = 0.0
 # Flag to skip optimization
 SKIP_OPTIMIZATION = True  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 600
+OPTIMIZATION_TRIALS = 1200
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
-MIN_WINDOW = 100#300
-MAX_WINDOW = 5000#20000
+MIN_WINDOW = 300
+MAX_WINDOW = 50000
 EQUITY_CURVE_PHASES = 9
 
 if USE_FAPT:
@@ -59,9 +60,7 @@ if USE_FAPT:
         market_weather_features[base_feature].append(stat_type)
 
 
-
-
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5):
     """Run trading strategy with given parameters"""
     model_params = {
         'n_estimators': 50,
@@ -227,7 +226,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 if high >= trade['take_profit']:
                     exit_price = trade['take_profit'] * (1 - SLIPPAGE)
                     profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-                    capital += profit
+                    # Add back the trade value plus profit/loss
+                    capital += trade['trade_value'] + profit
                     trade['exit_idx'] = idx
                     trade['exit_price'] = exit_price
                     trade['result'] = 'TP'
@@ -237,7 +237,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 elif low <= trade['stop_loss']:
                     exit_price = trade['stop_loss'] * (1 - SLIPPAGE)
                     profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-                    capital += profit
+                    # Add back the trade value plus profit/loss
+                    capital += trade['trade_value'] + profit
                     trade['exit_idx'] = idx
                     trade['exit_price'] = exit_price
                     trade['result'] = 'SL'
@@ -251,7 +252,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     if high >= tp_partial:
                         exit_price = tp_partial * (1 - SLIPPAGE)
                         profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-                        capital += profit
+                        # Add back the trade value plus profit/loss
+                        capital += trade['trade_value'] + profit
                         trade['exit_idx'] = idx
                         trade['exit_price'] = exit_price
                         trade['result'] = 'Partial TP'
@@ -261,7 +263,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     elif low <= projected_entry:
                         exit_price = projected_entry * (1 - SLIPPAGE)
                         profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-                        capital += profit
+                        # Add back the trade value plus profit/loss
+                        capital += trade['trade_value'] + profit
                         trade['exit_idx'] = idx
                         trade['exit_price'] = exit_price
                         trade['result'] = 'BE'
@@ -272,7 +275,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 if holding_period >= max_holding_period and trade not in closed_trades:
                     exit_price = row['Close'] * (1 - SLIPPAGE)
                     profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
-                    capital += profit
+                    # Add back the trade value plus profit/loss
+                    capital += trade['trade_value'] + profit
                     trade['exit_idx'] = idx
                     trade['exit_price'] = exit_price
                     trade['result'] = 'MAXHOLD'
@@ -299,7 +303,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Calculate stop loss and take profit based on ATR and risk_reward_ratio
                     # Use ATR for dynamic stop loss calculation
                     atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
-                    atr_multiplier = 1.5  # Use 2x ATR for stop loss distance
+                    atr_multiplier = stop_loss_atr_multiplier
                     stop_loss_distance = atr_value * atr_multiplier
                     stop_loss = entry_price - stop_loss_distance
                     take_profit = entry_price + (stop_loss_distance * risk_reward_ratio)
@@ -314,6 +318,10 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     
                     if size <= 0:
                         continue
+                    
+                    # Deduct capital when entering trade (this represents the capital at risk)
+                    trade_value = entry_price * size
+                    capital -= trade_value
                         
                     open_trades.append({
                         'entry_idx': idx,
@@ -321,7 +329,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         'stop_loss': stop_loss,
                         'take_profit': take_profit,
                         'size': size,
-                        'capital_at_entry': capital,
+                        'capital_at_entry': capital + trade_value,  # Store original capital before deduction
+                        'trade_value': trade_value,  # Store the value of the trade
                         'predicted_change': row['Predicted_Change'],
                         'risk_percentage': risk_percentage,
                         'result': None,
@@ -337,11 +346,12 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     for trade in open_trades:
         exit_price = df_window.iloc[-1]['Close'] * (1 - SLIPPAGE)
         profit = (exit_price - trade['entry_price']) * trade['size'] - 2 * TRANSACTION_FEE
+        # Add back the trade value plus profit/loss
+        capital += trade['trade_value'] + profit
         trade['exit_idx'] = len(df_window) - 1
         trade['exit_price'] = exit_price
         trade['result'] = 'EOD'
         trade['profit'] = profit
-        capital += profit
         trade_history.append(trade)
     
     # Update final equity curve value
@@ -465,6 +475,7 @@ def save_top_parameters(study, symbol):
                 'min_holding_period': params['min_holding_period'],
                 'max_holding_period': params['max_holding_period'],
                 'max_concurrent_trades': params['max_concurrent_trades'],
+                'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
                 'window_fraction': params['window_fraction'],
                 'retrain_fraction': params['retrain_fraction'],
                 'calculated_window_size': window_size,
@@ -497,12 +508,13 @@ def objective(trial):
     min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
     window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5) # 1% to 50% of the data
     retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
-    window_size = 200#clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = 15#max(int(window_size * retrain_fraction), 10)
+    window_size = clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
+    retrain_interval = max(int(window_size * retrain_fraction), 10)
     partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
     min_holding_period = trial.suggest_int('min_holding_period', 5, 20)
     max_holding_period = trial.suggest_int('max_holding_period', min_holding_period, 40)
     max_concurrent_trades = trial.suggest_int('max_concurrent_trades', 1, 10)
+    stop_loss_atr_multiplier = trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0)
     
     # Run strategy with current parameters
     metrics = run_strategy(df, 
@@ -518,7 +530,8 @@ def objective(trial):
                            max_holding_period, 
                            max_concurrent_trades,
                            feature_cols, 
-                           target_cols)
+                           target_cols,
+                           stop_loss_atr_multiplier)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -584,6 +597,7 @@ if __name__ == "__main__":
         print(f"Max Concurrent Trades: {DEFAULT_MAX_CONCURRENT_TRADES}")
         print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
         print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
+        print(f"Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
         best_metrics = run_strategy(df, 
                                     DEFAULT_MIN_RISK,
                                     DEFAULT_MAX_RISK, 
@@ -597,7 +611,8 @@ if __name__ == "__main__":
                                     DEFAULT_MAX_HOLDING_PERIOD,
                                     DEFAULT_MAX_CONCURRENT_TRADES,
                                     feature_cols,
-                                    target_cols)
+                                    target_cols,
+                                    DEFAULT_STOP_LOSS_ATR_MULTIPLIER)
         
         # Calculate composite score
         composite_score = (
@@ -612,6 +627,7 @@ if __name__ == "__main__":
             'risk_scaling_factor': DEFAULT_SCALING,
             'risk_reward_ratio': DEFAULT_RR,
             'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
+            'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
             'window_size': DEFAULT_WINDOW_SIZE,
             'retrain_interval': DEFAULT_RETREIN_INTERVAL,
             'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
@@ -702,7 +718,8 @@ if __name__ == "__main__":
             best_params['max_holding_period'],
             best_params['max_concurrent_trades'],
             feature_cols,
-            target_cols
+            target_cols,
+            best_params['stop_loss_atr_multiplier']
         )
         
         # Calculate final composite score
@@ -720,6 +737,7 @@ if __name__ == "__main__":
             'min_predicted_move': best_params['min_predicted_move'],
             'window_fraction': best_params['window_fraction'],
             'retrain_fraction': best_params['retrain_fraction'],
+            'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
             'window_size': window_size,
             'retrain_interval': retrain_interval,
             'partial_take_profit': best_params['partial_take_profit'],
@@ -748,6 +766,7 @@ if __name__ == "__main__":
     print(f"Risk Scaling: {best_params['risk_scaling_factor']:.2f}")
     print(f"Risk:Reward: {best_params['risk_reward_ratio']:.2f}")
     print(f"Min Predicted Move: {best_params['min_predicted_move']:.3f}")
+    print(f"Stop Loss ATR Multiplier: {best_params['stop_loss_atr_multiplier']:.2f}")
     print(f"Window Size: {best_params['window_size']}")
     print(f"Retrain Interval: {best_params['retrain_interval']}")
     print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")
