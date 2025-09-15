@@ -39,7 +39,9 @@ class CoinbaseAPIClient:
         self.model = None
         self.current_features = None
         self.window_size = 25000
-        
+        self.maker_fee = 0.006
+        self.taker_fee = 0.012
+
         # In-memory data storage
         self.historical_data = pd.DataFrame()  # Full historical dataset with indicators
         self.raw_data = pd.DataFrame()  # Raw OHLCV data without indicators
@@ -52,16 +54,17 @@ class CoinbaseAPIClient:
         self.last_retrain_time = None
         self.last_update_time = None
         self.trading_params = {
-            'min_risk_percentage': 0.013278226616841424,
-            'max_risk_percentage': 0.15828651179079864,
-            'risk_scaling_factor': 2,#1.7429109176364634,#1.6949727011806939,
-            'risk_reward_ratio': 2,#1.6037213842177254,
-            'min_predicted_move': 0.003695475106903262,#0.005113433706915217,
-            'partial_take_profit': 0.8675868861032823,
-            'stop_loss_atr_multiplier': 1.5,
-            'min_holding_period': 5,
-            'max_holding_period': 6,
-            'max_concurrent_trades': 8
+            'min_risk_percentage': 0.005050715939253347,
+            'max_risk_percentage': 0.03742776224889559,
+            'risk_scaling_factor': 2.9122956569535874,#1.7429109176364634,#1.6949727011806939,
+            'risk_reward_ratio': 1.7553062836156037,#1.6037213842177254,
+            'min_predicted_move': 0.004275510161827971,#0.005113433706915217,
+            'partial_take_profit': 0.7796142341082877,
+            'min_holding_period': 10,
+            'max_holding_period': 11,
+            'max_concurrent_trades': 9,
+            'stop_loss_atr_multiplier': 3.085350201403653,
+            'atr_predicted_weight': 0.36613925061300917,
         }
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
@@ -69,14 +72,18 @@ class CoinbaseAPIClient:
         self.stop_monitoring = False
         self.active_brackets = {}  # Track active bracket orders
         self.model_params = {
-            'n_estimators': 50,
-            'max_depth': 4,
-            'learning_rate': 0.1,
-            'min_child_weight': 10,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'reg_alpha': 0.5,
-            'reg_lambda': 1.0,
+            "learning_rate": 0.1081270658051096,
+            "n_estimators": 943,
+            "max_depth": 5,
+            "max_leaves": 123,
+            "min_child_weight": 0.6266777639806653,
+            "gamma": 0.1453711881569889,
+            "subsample": 0.8905128494073881,
+            "colsample_bytree": 0.4595148605371952,
+            "colsample_bylevel": 0.5233925218009232,
+            "reg_lambda": 1.4092734173101562,
+            "reg_alpha": 1.4151336617040773,
+            "max_bin": 563,
             'random_state': 42,
             'tree_method': 'hist',
             'device': 'cpu'
@@ -706,12 +713,36 @@ class CoinbaseAPIClient:
             risk_amount = self.capital * risk_percentage
             
             # Calculate stop loss and take profit based on risk_reward_ratio only
-            # Use ATR for dynamic stop loss calculation
-            atr_value = row['ATR'] if 'ATR' in row else entry_price * 0.01  # Fallback to 1% if ATR not available
-            atr_multiplier = self.trading_params['stop_loss_atr_multiplier']
-            stop_loss_distance = atr_value * atr_multiplier
-            stop_loss = entry_price - stop_loss_distance
-            take_profit = entry_price + (stop_loss_distance * self.trading_params['risk_reward_ratio'])
+            # # Use a fixed percentage for stop loss, then calculate take profit based on risk_reward_ratio
+            # stop_loss_percentage = 0.01  # 1% stop loss from entry price
+            # stop_loss = entry_price * (1 - stop_loss_percentage)
+            # take_profit = entry_price * (1 + (stop_loss_percentage * self.trading_params['risk_reward_ratio']))
+
+            # Calculate stop loss and take profit using hybrid ATR and predicted move approach
+            atr_value = self.historical_data['ATR'].iloc[-1]# if 'ATR' in self.historical_data else entry_price * 0.01  # Fallback to 1% if ATR not available
+            
+            # Calculate stop loss distance using hybrid approach
+            atr_stop_distance = atr_value * stop_loss_atr_multiplier
+            predicted_stop_distance = entry_price * predicted_move  # Convert predicted move to price distance
+            
+            # Weighted combination of ATR and predicted move
+            stop_loss_distance = (atr_predicted_weight * atr_stop_distance + 
+                                (1 - atr_predicted_weight) * predicted_stop_distance)
+            # Calculate fee compensation factors
+            # For stop loss: we need to account for the fact that we already paid the maker fee
+            # For take profit: we need to account for both maker fee (already paid) and taker fee (will be paid)
+            maker_fee_factor = 1 + self.maker_fee  # Factor to account for maker fee already paid
+            taker_fee_factor = 1 - self.taker_fee  # Factor to account for taker fee on exit
+            
+            # Adjust stop loss to compensate for maker fee (we already paid it, so we need less distance)
+            stop_loss = entry_price - (stop_loss_distance / maker_fee_factor)
+            
+            # Adjust take profit to compensate for both maker and taker fees
+            # We need to reach a higher price to achieve the desired net profit
+            target_net_profit = stop_loss_distance * risk_reward_ratio
+            # Calculate the gross price needed to achieve target net profit after fees
+            take_profit = entry_price + (target_net_profit / (maker_fee_factor * taker_fee_factor))
+
             risk_per_share = entry_price - stop_loss
             
             if risk_per_share <= 0 or np.isnan(risk_per_share):
