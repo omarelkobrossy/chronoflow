@@ -1,5 +1,5 @@
 {
-    "optimization_date": "2025-09-15 22:29:20",
+    "optimization_date": "2025-09-15 22:39:53",
     "top_parameters": [
         {
             "trial_number": 1424,
@@ -24,6 +24,31 @@
                 "win_rate": 69.59847036328873,
                 "max_drawdown": -34.56779941021107,
                 "trade_count": 523
+            }
+        },
+        {
+            "trial_number": 2371,
+            "score": 50.07144830283191,
+            "model_parameters": {
+                "learning_rate": 0.06299316184774414,
+                "n_estimators": 1142,
+                "max_depth": 4,
+                "max_leaves": 115,
+                "min_child_weight": 4.135770695742673,
+                "gamma": 0.2803666418340914,
+                "subsample": 0.7143308319098493,
+                "colsample_bytree": 0.437341954276615,
+                "colsample_bylevel": 0.8828715117490524,
+                "reg_lambda": 1.2324098228090836,
+                "reg_alpha": 0.03196502592230064,
+                "max_bin": 703
+            },
+            "metrics": {
+                "total_return": 5007.144830283191,
+                "sharpe_ratio": 0.6280958272672323,
+                "win_rate": 65.74746008708273,
+                "max_drawdown": -51.49324698115,
+                "trade_count": 689
             }
         },
         {
@@ -224,31 +249,6 @@
                 "win_rate": 67.28187919463086,
                 "max_drawdown": -41.65205231466101,
                 "trade_count": 596
-            }
-        },
-        {
-            "trial_number": 1134,
-            "score": 45.76879741106696,
-            "model_parameters": {
-                "learning_rate": 0.09223612476932005,
-                "n_estimators": 1030,
-                "max_depth": 5,
-                "max_leaves": 60,
-                "min_child_weight": 3.005198083030569,
-                "gamma": 0.3337613252971121,
-                "subsample": 0.6676623686240237,
-                "colsample_bytree": 0.481297631994037,
-                "colsample_bylevel": 0.9474266401206632,
-                "reg_lambda": 1.644770648924969,
-                "reg_alpha": 0.4666145935593863,
-                "max_bin": 534
-            },
-            "metrics": {
-                "total_return": 4576.879741106696,
-                "sharpe_ratio": 0.63836967737189,
-                "win_rate": 66.38795986622074,
-                "max_drawdown": -45.40329473612942,
-                "trade_count": 598
             }
         }
     ]

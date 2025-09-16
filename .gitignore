@@ -8,3 +8,4 @@ __pycache__/
 DB/*
 .env
 settings/cdp_api_key.json
+Visualization/*

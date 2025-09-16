@@ -250,6 +250,65 @@ def calculate_max_drawdown(equity_curve):
     drawdowns = equity_curve / rolling_max - 1
     return drawdowns.min()
 
+def calculate_cagr(initial_capital, final_capital, start_date, end_date):
+    """
+    Calculate Compound Annual Growth Rate (CAGR)
+    
+    Args:
+        initial_capital: Starting capital amount
+        final_capital: Ending capital amount
+        start_date: Start date (pandas Timestamp or datetime)
+        end_date: End date (pandas Timestamp or datetime)
+    
+    Returns:
+        CAGR as a decimal (e.g., 0.15 for 15%)
+    """
+    # Convert to pandas Timestamp if needed
+    if not isinstance(start_date, pd.Timestamp):
+        start_date = pd.to_datetime(start_date)
+    if not isinstance(end_date, pd.Timestamp):
+        end_date = pd.to_datetime(end_date)
+    
+    # Calculate number of years as float
+    years = (end_date - start_date).total_seconds() / (365.25 * 24 * 3600)
+    
+    # Handle edge cases
+    if years <= 0:
+        return 0.0
+    if final_capital <= 0:
+        return -1.0  # Complete loss
+    
+    # Calculate CAGR: ((final / initial)^(1/years)) - 1
+    cagr = ((final_capital / initial_capital) ** (1 / years)) - 1
+    
+    return cagr
+
+def calculate_mar(cagr, max_drawdown):
+    """
+    Calculate Managed Account Ratio (MAR)
+    
+    MAR = CAGR / |Max Drawdown|
+    
+    This ratio measures the return per unit of risk (drawdown).
+    Higher MAR values indicate better risk-adjusted returns.
+    
+    Args:
+        cagr: Compound Annual Growth Rate as decimal (e.g., 0.15 for 15%)
+        max_drawdown: Maximum drawdown as decimal (e.g., -0.10 for -10%)
+    
+    Returns:
+        MAR as a decimal (e.g., 1.5 for 1.5x)
+    """
+    # Handle edge cases
+    if max_drawdown == 0:
+        # If no drawdown, MAR is undefined (return a high value)
+        return float('inf') if cagr > 0 else 0.0
+    
+    # Convert max_drawdown to absolute value and calculate MAR
+    mar = cagr / abs(max_drawdown)
+    
+    return mar
+
 def calculate_dynamic_slippage(entry_price):
     """Calculate slippage based on capital using logarithmic scaling"""
     min_slippage = 0.0001  # 0.01%

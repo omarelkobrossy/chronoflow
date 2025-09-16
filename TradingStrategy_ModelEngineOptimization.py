@@ -7,7 +7,7 @@ from datetime import datetime
 import optuna
 import json
 import math
-from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
@@ -473,6 +473,15 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         trade_pnl = trade_final_value - trade['trade_value']
         final_portfolio_value += trade_pnl
     
+    # Calculate CAGR using the trading period dates
+    trading_start_date = df_window['Date'].iloc[trading_start_idx]
+    trading_end_date = df_window['Date'].iloc[-1]
+    cagr = calculate_cagr(INITIAL_CAPITAL, final_portfolio_value, trading_start_date, trading_end_date)
+    
+    # Calculate MAR (Managed Account Ratio) = CAGR / |Max Drawdown|
+    max_drawdown_decimal = calculate_max_drawdown(equity_curve)
+    mar = calculate_mar(cagr, max_drawdown_decimal)
+    
     # Handle case where no trades were made
     if len(results_df) == 0:
         metrics = {
@@ -481,6 +490,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             'sharpe_ratio': 0.0,
             'win_rate': 0.0,
             'max_drawdown': 0.0,
+            'cagr': cagr * 100,  # Convert to percentage
+            'mar': mar,  # MAR is already a ratio, no conversion needed
             'trade_count': 0,
             'equity_curve': equity_curve,
             'trade_history': results_df
@@ -492,6 +503,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             'sharpe_ratio': calculate_sharpe_ratio(returns),
             'win_rate': np.mean(results_df['profit'] > 0) * 100,
             'max_drawdown': calculate_max_drawdown(equity_curve) * 100,
+            'cagr': cagr * 100,  # Convert to percentage
+            'mar': mar,  # MAR is already a ratio, no conversion needed
             'trade_count': len(results_df),
             'equity_curve': equity_curve,
             'trade_history': results_df
@@ -592,6 +605,8 @@ def save_top_parameters(study, symbol):
                 'sharpe_ratio': attrs.get('sharpe_ratio', 0.0),
                 'win_rate': attrs.get('win_rate', 0.0),
                 'max_drawdown': attrs.get('max_drawdown', 0.0),
+                'cagr': attrs.get('cagr', 0.0),
+                'mar': attrs.get('mar', 0.0),
                 'trade_count': attrs.get('trade_count', 0)
             }
         })
@@ -653,6 +668,8 @@ def objective(trial):
     trial.set_user_attr('sharpe_ratio', metrics['sharpe_ratio'])
     trial.set_user_attr('win_rate', metrics['win_rate'])
     trial.set_user_attr('max_drawdown', metrics['max_drawdown'])
+    trial.set_user_attr('cagr', metrics['cagr'])
+    trial.set_user_attr('mar', metrics['mar'])
     trial.set_user_attr('trade_count', metrics['trade_count'])
     
     # Convert equity curve to JSON serializable format
@@ -782,6 +799,8 @@ if __name__ == "__main__":
             'sharpe_ratio': best_metrics['sharpe_ratio'],
             'win_rate': best_metrics['win_rate'],
             'max_drawdown': best_metrics['max_drawdown'],
+            'cagr': best_metrics['cagr'],
+            'mar': best_metrics['mar'],
             'trade_count': best_metrics['trade_count'],
             'composite_score': composite_score,
             'equity_curve': best_metrics['equity_curve'],
@@ -908,6 +927,8 @@ if __name__ == "__main__":
             'sharpe_ratio': best_metrics['sharpe_ratio'],
             'win_rate': best_metrics['win_rate'],
             'max_drawdown': best_metrics['max_drawdown'],
+            'cagr': best_metrics['cagr'],
+            'mar': best_metrics['mar'],
             'trade_count': best_metrics['trade_count'],
             'composite_score': final_composite_score,
             'equity_curve': best_metrics['equity_curve'],
@@ -938,6 +959,8 @@ if __name__ == "__main__":
     print(f"Sharpe Ratio: {best_params['sharpe_ratio']:.2f}")
     print(f"Win Rate: {best_params['win_rate']:.2f}%")
     print(f"Max Drawdown: {best_params['max_drawdown']:.2f}%")
+    print(f"CAGR: {best_params['cagr']:.2f}%")
+    print(f"MAR: {best_params['mar']:.2f}")
     print(f"Trade Count: {best_params['trade_count']}")
     print(f"Composite Score: {best_params['composite_score']:.2f}")
 
