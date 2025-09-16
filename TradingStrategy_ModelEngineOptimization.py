@@ -18,19 +18,19 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.013278226616841424
-DEFAULT_MAX_RISK = 0.15828651179079864
-DEFAULT_SCALING = 2
-DEFAULT_RR = 2
-DEFAULT_MIN_PREDICTED_MOVE = 0.005695475106903262
-DEFAULT_MIN_HOLDING_PERIOD = 8
-DEFAULT_MAX_HOLDING_PERIOD = 9
-DEFAULT_PARTIAL_TAKE_PROFIT = 0.8675868861032823
-DEFAULT_MAX_CONCURRENT_TRADES = 8
+DEFAULT_MIN_RISK = 0.018193997619464653
+DEFAULT_MAX_RISK = 0.8396903321522786
+DEFAULT_SCALING = 2.3336616807215136
+DEFAULT_RR = 1.5016122471326743
+DEFAULT_MIN_PREDICTED_MOVE = 0.005653821215830177
+DEFAULT_MIN_HOLDING_PERIOD = 9
+DEFAULT_MAX_HOLDING_PERIOD = 10
+DEFAULT_PARTIAL_TAKE_PROFIT = 0.7879261282151514
+DEFAULT_MAX_CONCURRENT_TRADES = 9
 DEFAULT_WINDOW_SIZE = 25000
 DEFAULT_RETREIN_INTERVAL = 25000
-DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 1.5
-DEFAULT_ATR_PREDICTED_WEIGHT = 0.6  # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
+DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.8680612209950582
+DEFAULT_ATR_PREDICTED_WEIGHT = 0.8151555981889735  # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -47,7 +47,7 @@ RESUME_STUDY = True  # Set to True to resume from previous study, False to start
 
 MIN_WINDOW = 300
 MAX_WINDOW = 50000
-EQUITY_CURVE_PHASES = 9
+EQUITY_CURVE_PHASES = 4
 
 if USE_FAPT:
 
@@ -77,7 +77,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     rolling_metrics = []
     # Initialize equity curve only for the trading period (after initial training window)
     trading_start_idx = window_size
-    equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=INITIAL_CAPITAL, dtype=np.float64)
+    equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=np.nan, dtype=np.float64)
     
     n = len(df_window)
     
@@ -332,7 +332,21 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # scaling_factor = min(1.0, capital / BREAK_EVEN_CAPITAL)  # 0 to 1
                     # adjusted_risk_pct = risk_percentage / scaling_factor
                     
-                    risk_amount = capital * risk_percentage
+                    # Calculate available cash (capital minus the value of open trades)
+                    # This simulates realistic cash management where each trade uses remaining cash
+                    available_cash = capital
+                    total_open_trade_value = 0
+                    for trade in open_trades:
+                        # Subtract the trade value (including maker fee) from available cash
+                        available_cash -= trade['trade_value']
+                        total_open_trade_value += trade['trade_value']
+                    
+                    # Only proceed if we have enough cash for this trade
+                    if available_cash <= 0:
+                        continue
+                    
+                    # Use available cash instead of total capital for risk calculation
+                    risk_amount = available_cash * risk_percentage
                     # Calculate stop loss and take profit using hybrid ATR and predicted move approach
                     atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
                     
@@ -364,7 +378,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         continue
                         
                     size = risk_amount / risk_per_share
-                    size = min(size, capital / entry_price)
+                    # Also limit size by available cash (not total capital)
+                    size = min(size, available_cash / entry_price)
                     size = np.floor(size)
                     
                     if size <= 0:
@@ -373,7 +388,18 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Calculate trade value with Maker fee (0.6% added to trade value)
                     base_trade_value = entry_price * size
                     maker_fee_amount = base_trade_value * MAKER_FEE
-                    trade_value = base_trade_value + maker_fee_amount                    
+                    trade_value = base_trade_value + maker_fee_amount
+                    
+                    # Final check: ensure we don't exceed available cash
+                    if trade_value > available_cash:
+                        # Reduce size to fit available cash
+                        max_base_value = available_cash / (1 + MAKER_FEE)
+                        size = np.floor(max_base_value / entry_price)
+                        if size <= 0:
+                            continue
+                        base_trade_value = entry_price * size
+                        maker_fee_amount = base_trade_value * MAKER_FEE
+                        trade_value = base_trade_value + maker_fee_amount                    
                         
                     open_trades.append({
                         'entry_idx': idx,
@@ -391,7 +417,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         'profit': None
                     })
             
-            # Calculate total portfolio value (cash + open trade values)
+            # Calculate total portfolio value (cash + open trade values) for every bar
             total_portfolio_value = capital
             for trade in open_trades:
                 # Calculate current value of open trade based on current price

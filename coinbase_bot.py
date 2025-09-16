@@ -54,17 +54,17 @@ class CoinbaseAPIClient:
         self.last_retrain_time = None
         self.last_update_time = None
         self.trading_params = {
-            'min_risk_percentage': 0.005050715939253347,
-            'max_risk_percentage': 0.03742776224889559,
-            'risk_scaling_factor': 2.9122956569535874,#1.7429109176364634,#1.6949727011806939,
-            'risk_reward_ratio': 1.7553062836156037,#1.6037213842177254,
-            'min_predicted_move': 0.004275510161827971,#0.005113433706915217,
-            'partial_take_profit': 0.7796142341082877,
-            'min_holding_period': 10,
-            'max_holding_period': 11,
+            'min_risk_percentage': 0.018193997619464653,
+            'max_risk_percentage': 0.0396903321522786,
+            'risk_scaling_factor': 2.3336616807215136,#1.7429109176364634,#1.6949727011806939,
+            'risk_reward_ratio': 1.5016122471326743,#1.6037213842177254,
+            'min_predicted_move': 0.005653821215830177,#0.005113433706915217,
+            'partial_take_profit': 0.807345377350049,
+            'min_holding_period': 9,
+            'max_holding_period': 10,
             'max_concurrent_trades': 9,
-            'stop_loss_atr_multiplier': 3.085350201403653,
-            'atr_predicted_weight': 0.36613925061300917,
+            'stop_loss_atr_multiplier': 3.8680612209950582,
+            'atr_predicted_weight': 0.8151555981889735,
         }
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
@@ -722,24 +722,24 @@ class CoinbaseAPIClient:
             atr_value = self.historical_data['ATR'].iloc[-1]# if 'ATR' in self.historical_data else entry_price * 0.01  # Fallback to 1% if ATR not available
             
             # Calculate stop loss distance using hybrid approach
-            atr_stop_distance = atr_value * stop_loss_atr_multiplier
+            atr_stop_distance = atr_value * self.trading_params['stop_loss_atr_multiplier']
             predicted_stop_distance = entry_price * predicted_move  # Convert predicted move to price distance
             
             # Weighted combination of ATR and predicted move
-            stop_loss_distance = (atr_predicted_weight * atr_stop_distance + 
+            stop_loss_distance = (self.trading_params['atr_predicted_weight'] * atr_stop_distance + 
                                 (1 - atr_predicted_weight) * predicted_stop_distance)
             # Calculate fee compensation factors
             # For stop loss: we need to account for the fact that we already paid the maker fee
             # For take profit: we need to account for both maker fee (already paid) and taker fee (will be paid)
-            maker_fee_factor = 1 + self.maker_fee  # Factor to account for maker fee already paid
-            taker_fee_factor = 1 - self.taker_fee  # Factor to account for taker fee on exit
+            maker_fee_factor = 1 + self.trading_params['maker_fee']  # Factor to account for maker fee already paid
+            taker_fee_factor = 1 - self.trading_params['taker_fee']  # Factor to account for taker fee on exit
             
             # Adjust stop loss to compensate for maker fee (we already paid it, so we need less distance)
             stop_loss = entry_price - (stop_loss_distance / maker_fee_factor)
             
             # Adjust take profit to compensate for both maker and taker fees
             # We need to reach a higher price to achieve the desired net profit
-            target_net_profit = stop_loss_distance * risk_reward_ratio
+            target_net_profit = stop_loss_distance * self.trading_params['risk_reward_ratio']
             # Calculate the gross price needed to achieve target net profit after fees
             take_profit = entry_price + (target_net_profit / (maker_fee_factor * taker_fee_factor))
 

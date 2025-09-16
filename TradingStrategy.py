@@ -18,19 +18,19 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.005050715939253347
-DEFAULT_MAX_RISK = 0.03742776224889559
-DEFAULT_SCALING = 2.9122956569535874
-DEFAULT_RR = 1.7553062836156037
-DEFAULT_MIN_PREDICTED_MOVE = 0.007275510161827971
-DEFAULT_MIN_HOLDING_PERIOD = 9
-DEFAULT_MAX_HOLDING_PERIOD = 9
-DEFAULT_PARTIAL_TAKE_PROFIT = 0.7796142341082877
-DEFAULT_MAX_CONCURRENT_TRADES = 9
-DEFAULT_WINDOW_SIZE = 3233
-DEFAULT_RETREIN_INTERVAL = 281
-DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.085350201403653
-DEFAULT_ATR_PREDICTED_WEIGHT = 0.36613925061300917  # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
+DEFAULT_MIN_RISK = 0.019730020745227263
+DEFAULT_MAX_RISK = 0.029423066916484733
+DEFAULT_SCALING = 2.0908369643797564
+DEFAULT_RR = 1.6971206233235478
+DEFAULT_MIN_PREDICTED_MOVE = 0.009833451325784833
+DEFAULT_MIN_HOLDING_PERIOD = 6
+DEFAULT_MAX_HOLDING_PERIOD = 7
+DEFAULT_PARTIAL_TAKE_PROFIT = 0.807345377350049
+DEFAULT_MAX_CONCURRENT_TRADES = 10
+DEFAULT_WINDOW_SIZE = 25000
+DEFAULT_RETREIN_INTERVAL = 25000
+DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.547732908433746
+DEFAULT_ATR_PREDICTED_WEIGHT = 0.4310703192463601  # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -40,7 +40,7 @@ TAKER_FEE = 0.012  # 1.2% fee when selling (deducted from sale value)
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = False  # Set to True to use default parameters
+SKIP_OPTIMIZATION = True  # Set to True to use default parameters
 USE_FAPT = False
 OPTIMIZATION_TRIALS = 1200
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
@@ -94,7 +94,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     rolling_metrics = []
     # Initialize equity curve only for the trading period (after initial training window)
     trading_start_idx = window_size
-    equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=INITIAL_CAPITAL, dtype=np.float64)
+    equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=np.nan, dtype=np.float64)
     
     n = len(df_window)
     
@@ -325,10 +325,26 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         min_risk_percentage * (1 + (predicted_move / min_predicted_move) * risk_scaling_factor),
                         max_risk_percentage
                     )
-                    # scaling_factor = min(1.0, capital / BREAK_EVEN_CAPITAL)  # 0 to 1
-                    # adjusted_risk_pct = risk_percentage / scaling_factor
                     
-                    risk_amount = capital * risk_percentage
+                    # Calculate available cash (capital minus the value of open trades)
+                    # This simulates realistic cash management where each trade uses remaining cash
+                    available_cash = capital
+                    total_open_trade_value = 0
+                    for trade in open_trades:
+                        # Subtract the trade value (including maker fee) from available cash
+                        available_cash -= trade['trade_value']
+                        total_open_trade_value += trade['trade_value']
+                    
+                    # Only proceed if we have enough cash for this trade
+                    if available_cash <= 0:
+                        continue
+                    
+                    # Debug: Show cash management for first few trades
+                    if len(trade_history) < 5:
+                        print(f"  Trade #{len(trade_history)+1}: Capital=${capital:.2f}, Open Trades=${total_open_trade_value:.2f}, Available=${available_cash:.2f}")
+                    
+                    # Use available cash instead of total capital for risk calculation
+                    risk_amount = available_cash * risk_percentage
                     # Calculate stop loss and take profit using hybrid ATR and predicted move approach
                     atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
                     
@@ -360,7 +376,8 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         continue
                         
                     size = risk_amount / risk_per_share
-                    size = min(size, capital / entry_price)
+                    # Also limit size by available cash (not total capital)
+                    size = min(size, available_cash / entry_price)
                     size = np.floor(size)
                     
                     if size <= 0:
@@ -370,6 +387,17 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     base_trade_value = entry_price * size
                     maker_fee_amount = base_trade_value * MAKER_FEE
                     trade_value = base_trade_value + maker_fee_amount
+                    
+                    # Final check: ensure we don't exceed available cash
+                    if trade_value > available_cash:
+                        # Reduce size to fit available cash
+                        max_base_value = available_cash / (1 + MAKER_FEE)
+                        size = np.floor(max_base_value / entry_price)
+                        if size <= 0:
+                            continue
+                        base_trade_value = entry_price * size
+                        maker_fee_amount = base_trade_value * MAKER_FEE
+                        trade_value = base_trade_value + maker_fee_amount
                         
                     open_trades.append({
                         'entry_idx': idx,
@@ -387,7 +415,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         'profit': None
                     })
             
-            # Calculate total portfolio value (cash + open trade values)
+            # Calculate total portfolio value (cash + open trade values) for every bar
             total_portfolio_value = capital
             for trade in open_trades:
                 # Calculate current value of open trade based on current price
@@ -584,7 +612,22 @@ def objective(trial):
     """Objective function for Optuna optimization"""
     # Define parameter ranges
     min_risk = trial.suggest_float('min_risk_percentage', 0.005, 0.02)
-    max_risk = trial.suggest_float('max_risk_percentage', min_risk, min(0.05, min_risk*1.5))
+    # Ensure max_risk is properly constrained: min_risk <= max_risk <= min(0.05, min_risk*1.5)
+    max_risk_upper_bound = min(0.05, min_risk * 1.5)
+    max_risk = trial.suggest_float('max_risk_percentage', min_risk, max_risk_upper_bound)
+    
+    # Debug: Print constraint values for first few trials
+    if trial.number < 3:
+        print(f"  Constraint check - min_risk: {min_risk:.6f}, max_risk_upper_bound: {max_risk_upper_bound:.6f}, max_risk: {max_risk:.6f}")
+        print(f"  Constraint satisfied: {min_risk <= max_risk <= max_risk_upper_bound}")
+    
+    # Safety check: Ensure max_risk never exceeds the intended constraint
+    if max_risk > max_risk_upper_bound:
+        print(f"  WARNING: max_risk ({max_risk:.6f}) exceeded upper bound ({max_risk_upper_bound:.6f}). Clamping to upper bound.")
+        max_risk = max_risk_upper_bound
+    if max_risk < min_risk:
+        print(f"  WARNING: max_risk ({max_risk:.6f}) below min_risk ({min_risk:.6f}). Setting to min_risk.")
+        max_risk = min_risk
     scaling_factor = trial.suggest_float('risk_scaling_factor', 1.5, 3.0)
     reward_ratio = trial.suggest_float('risk_reward_ratio', 1.5, 3.0)
     min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
@@ -686,12 +729,12 @@ if __name__ == "__main__":
     
     #Filter data by time range
     start_date = '2025-01-15'  # Format: 'YYYY-MM-DD'
-    end_date = '2025-03-31'    # Format: 'YYYY-MM-DD'
+    #end_date = '2025-03-31'    # Format: 'YYYY-MM-DD'
 
     # For default mode, use DEFAULT_WINDOW_SIZE for buffering
     if SKIP_OPTIMIZATION:
         buffered_start_date = pd.to_datetime(start_date) - pd.Timedelta(days=DEFAULT_WINDOW_SIZE*15/60/24)
-        df = df[(df['Date'] >= buffered_start_date) & (df['Date'] <= end_date)]
+        df = df[(df['Date'] >= buffered_start_date)]# & (df['Date'] <= end_date)]
         print(f"Default mode: Data filtered with DEFAULT_WINDOW_SIZE={DEFAULT_WINDOW_SIZE}")
         print(f"Buffered start date: {buffered_start_date}")
         print(f"Final data length: {len(df)} bars")
