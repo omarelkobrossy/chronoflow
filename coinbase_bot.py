@@ -61,6 +61,7 @@ class CoinbaseAPIClient:
             'min_predicted_move': 0.005653821215830177,#0.005113433706915217,
             'partial_take_profit': 0.807345377350049,
             'min_holding_period': 9,
+            'aggressiveness': 2,
             'max_holding_period': 10,
             'max_concurrent_trades': 9,
             'stop_loss_atr_multiplier': 3.8680612209950582,
@@ -705,8 +706,17 @@ class CoinbaseAPIClient:
             entry_price = current_price
             
             predicted_move = abs(prediction)*3
+            
+            # Calculate how much the predicted move exceeds the minimum threshold
+            move_excess_ratio = (predicted_move - self.trading_params['min_predicted_move']) / self.trading_params['min_predicted_move']
+            
+            # Apply aggressiveness scaling: higher aggressiveness = faster scaling to max risk
+            # aggressiveness=1: linear scaling, aggressiveness=2: quadratic scaling, etc.
+            scaled_excess = move_excess_ratio ** (1 / self.trading_params['aggressiveness'])
+            
+            # Calculate risk percentage with aggressiveness-controlled scaling
             risk_percentage = min(
-                self.trading_params['min_risk_percentage'] * (1 + (predicted_move / self.trading_params['min_predicted_move']) * self.trading_params['risk_scaling_factor']),
+                self.trading_params['min_risk_percentage'] + (self.trading_params['max_risk_percentage'] - self.trading_params['min_risk_percentage']) * min(scaled_excess * self.trading_params['risk_scaling_factor'], 1.0),
                 self.trading_params['max_risk_percentage']
             )
             

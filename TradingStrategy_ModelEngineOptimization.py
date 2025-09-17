@@ -31,6 +31,7 @@ DEFAULT_WINDOW_SIZE = 25000
 DEFAULT_RETREIN_INTERVAL = 25000
 DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.8680612209950582
 DEFAULT_ATR_PREDICTED_WEIGHT = 0.8151555981889735  # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
+DEFAULT_AGGRESSIVENESS = 2
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -62,7 +63,7 @@ if USE_FAPT:
         market_weather_features[base_feature].append(stat_type)
 
 
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, model_params=None):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, aggressiveness=2, model_params=None):
     """Run trading strategy with given parameters"""
     
     # Initialize predicted change column
@@ -325,8 +326,17 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     entry_price = row['Open'] * (1 + SLIPPAGE)
                     
                     predicted_move = abs(row['Predicted_Change'])
+                    
+                    # Calculate how much the predicted move exceeds the minimum threshold
+                    move_excess_ratio = (predicted_move - min_predicted_move) / min_predicted_move
+                    
+                    # Apply aggressiveness scaling: higher aggressiveness = faster scaling to max risk
+                    # aggressiveness=1: linear scaling, aggressiveness=2: quadratic scaling, etc.
+                    scaled_excess = move_excess_ratio ** (1 / aggressiveness)
+                    
+                    # Calculate risk percentage with aggressiveness-controlled scaling
                     risk_percentage = min(
-                        min_risk_percentage * (1 + (predicted_move / min_predicted_move) * risk_scaling_factor),
+                        min_risk_percentage + (max_risk_percentage - min_risk_percentage) * min(scaled_excess * risk_scaling_factor, 1.0),
                         max_risk_percentage
                     )
                     # scaling_factor = min(1.0, capital / BREAK_EVEN_CAPITAL)  # 0 to 1
@@ -377,7 +387,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     if risk_per_share <= 0 or np.isnan(risk_per_share):
                         continue
                         
-                    size = risk_amount / risk_per_share
+                    size = risk_amount / entry_price
                     # Also limit size by available cash (not total capital)
                     size = min(size, available_cash / entry_price)
                     size = np.floor(size)
@@ -657,6 +667,7 @@ def objective(trial):
                            target_cols,
                            DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
                            DEFAULT_ATR_PREDICTED_WEIGHT,
+                           DEFAULT_AGGRESSIVENESS,
                            model_params)
     
     # If no trades were made, return a very low score
@@ -728,6 +739,7 @@ if __name__ == "__main__":
         print(f"  Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
         print(f"  Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
         print(f"  ATR vs Predicted Weight: {DEFAULT_ATR_PREDICTED_WEIGHT}")
+        print(f"  Aggressiveness: {DEFAULT_AGGRESSIVENESS}")
         print(f"  Maker Fee (Buy): {MAKER_FEE*100:.1f}%")
         print(f"  Taker Fee (Sell): {TAKER_FEE*100:.1f}%")
         print(f"  Total Round-trip Cost: {(MAKER_FEE + TAKER_FEE)*100:.1f}%")
@@ -757,6 +769,7 @@ if __name__ == "__main__":
                                     target_cols,
                                     DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
                                     DEFAULT_ATR_PREDICTED_WEIGHT,
+                                    DEFAULT_AGGRESSIVENESS,
                                     None)  # Use default model parameters
         
         # Calculate composite score

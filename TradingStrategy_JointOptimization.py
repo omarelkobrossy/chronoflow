@@ -18,8 +18,8 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.119730020745227263
-DEFAULT_MAX_RISK = 0.529423066916484733
+DEFAULT_MIN_RISK = 0.019730020745227263
+DEFAULT_MAX_RISK = 0.029423066916484733
 DEFAULT_SCALING = 2.0908369643797564
 DEFAULT_RR = 1.6971206233235478
 DEFAULT_MIN_PREDICTED_MOVE = 0.009833451325784833
@@ -41,9 +41,9 @@ TAKER_FEE = 0.012  # 1.2% fee when selling (deducted from sale value)
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = True  # Set to True to use default parameters
+SKIP_OPTIMIZATION = False  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 1500
+OPTIMIZATION_TRIALS = 4000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
 MIN_WINDOW = 300
@@ -63,25 +63,8 @@ if USE_FAPT:
         market_weather_features[base_feature].append(stat_type)
 
 
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, aggressiveness=2):
-    """Run trading strategy with given parameters"""
-    model_params = {
-        "learning_rate": 0.1081270658051096,
-        "n_estimators": 943,
-        "max_depth": 5,
-        "max_leaves": 123,
-        "min_child_weight": 0.6266777639806653,
-        "gamma": 0.1453711881569889,
-        "subsample": 0.8905128494073881,
-        "colsample_bytree": 0.4595148605371952,
-        "colsample_bylevel": 0.5233925218009232,
-        "reg_lambda": 1.4092734173101562,
-        "reg_alpha": 1.4151336617040773,
-        "max_bin": 563,
-        'random_state': 42,
-        'tree_method': 'hist',
-    }
-    
+def run_strategy(df_window, T, H, feature_cols, target_cols):
+ 
     # Initialize predicted change column
     df_window['Predicted_Change'] = np.nan
     
@@ -93,14 +76,14 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     holdout_actuals = []
     rolling_metrics = []
     # Initialize equity curve only for the trading period (after initial training window)
-    trading_start_idx = window_size
+    trading_start_idx = T['window_size']
     equity_curve = pd.Series(index=df_window['Date'].iloc[trading_start_idx:], data=np.nan, dtype=np.float64)
     
     n = len(df_window)
     
     # Initialize model and feature importance for first window
     print("\nInitializing first window...")
-    initial_window = df_window.iloc[:window_size].copy()
+    initial_window = df_window.iloc[:T['window_size']].copy()
     current_features = calculate_feature_importance(
         initial_window, 
         feature_cols, 
@@ -110,31 +93,31 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         visualize_importance=False
     )
     
-    model = xgb.XGBRegressor(**model_params)
+    model = xgb.XGBRegressor(**H)
     
     # Scale initial window data
-    X_initial = df_window.iloc[:window_size][current_features].copy()
+    X_initial = df_window.iloc[:T['window_size']][current_features].copy()
     for col in current_features:
         # Use expanding mean/std for scaling with shift to prevent look-ahead bias
         mean = X_initial[col].expanding(min_periods=1).mean().shift(1)
         std = X_initial[col].expanding(min_periods=1).std().shift(1)
         X_initial[col] = (X_initial[col] - mean) / (std + 1e-8)
     
-    y_initial = df_window.iloc[:window_size][target_cols].values.ravel()
+    y_initial = df_window.iloc[:T['window_size']][target_cols].values.ravel()
     model.fit(X_initial, y_initial)
     
     # Process data in chunks
     print("\nProcessing data in chunks...")
     total_data_processed = 0
     
-    for start in range(window_size, n, retrain_interval):
-        end = min(start + retrain_interval, n)
-        total_data_processed += retrain_interval
+    for start in range(T['window_size'], n, T['retrain_interval']):
+        end = min(start + T['retrain_interval'], n)
+        total_data_processed += T['retrain_interval']
         
         # Recalculate feature importance every window_size worth of data
-        if total_data_processed >= retrain_interval:
+        if total_data_processed >= T['retrain_interval']:
             print(f"\nRecalculating feature importance at index {start}...")
-            feature_selection_data = df_window.iloc[start-window_size:start].copy()
+            feature_selection_data = df_window.iloc[start-T['window_size']:start].copy()
             current_features = calculate_feature_importance(
                 feature_selection_data,
                 feature_cols,
@@ -166,7 +149,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             current_X_holdout[col] = (current_X_holdout[col] - last_mean) / (last_std + 1e-8)
         
         # Train model on current training data
-        current_model = xgb.XGBRegressor(**model_params)
+        current_model = xgb.XGBRegressor(**H)
         current_model.fit(current_X_train, current_y_train)
 
         # Make predictions on current holdout chunk
@@ -259,13 +242,13 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     trade['profit'] = profit
                     trade_history.append(trade)
                     closed_trades.append(trade)
-                elif holding_period >= min_holding_period:
+                elif holding_period >= T['min_holding_period']:
                     projected_tp = trade['take_profit']
                     projected_entry = trade['entry_price']
                     # Calculate partial take profit with fee compensation
                     # The partial TP should be adjusted to account for the taker fee
                     taker_fee_factor = 1 - TAKER_FEE
-                    tp_partial = projected_entry + partial_take_profit * (projected_tp - projected_entry) / taker_fee_factor
+                    tp_partial = projected_entry + T['partial_take_profit'] * (projected_tp - projected_entry) / taker_fee_factor
                     if high >= tp_partial:
                         exit_price = tp_partial * (1 - SLIPPAGE)
                         # Calculate profit with Taker fee (1.2% deducted from sale value)
@@ -297,7 +280,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         trade_history.append(trade)
                         closed_trades.append(trade)
                 
-                if holding_period >= max_holding_period and trade not in closed_trades:
+                if holding_period >= T['max_holding_period'] and trade not in closed_trades:
                     exit_price = row['Close'] * (1 - SLIPPAGE)
                     # Calculate profit with Taker fee (1.2% deducted from sale value)
                     gross_profit = (exit_price - trade['entry_price']) * trade['size']
@@ -316,23 +299,23 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             open_trades = [t for t in open_trades if t not in closed_trades]
             
             # Entry logic
-            if len(open_trades) < max_concurrent_trades:
-                if row['Predicted_Change'] < -min_predicted_move:
+            if len(open_trades) < T['max_concurrent_trades']:
+                if row['Predicted_Change'] < -T['min_predicted_move']:
                     entry_price = row['Open'] * (1 + SLIPPAGE)
                     
                     predicted_move = abs(row['Predicted_Change'])
                     
                     # Calculate how much the predicted move exceeds the minimum threshold
-                    move_excess_ratio = (predicted_move - min_predicted_move) / min_predicted_move
+                    move_excess_ratio = (predicted_move - T['min_predicted_move']) / T['min_predicted_move']
                     
                     # Apply aggressiveness scaling: higher aggressiveness = faster scaling to max risk
                     # aggressiveness=1: linear scaling, aggressiveness=2: quadratic scaling, etc.
-                    scaled_excess = move_excess_ratio ** (1 / aggressiveness)
+                    scaled_excess = move_excess_ratio ** (1 / T['aggressiveness'])
                     
                     # Calculate risk percentage with aggressiveness-controlled scaling
                     risk_percentage = min(
-                        min_risk_percentage + (max_risk_percentage - min_risk_percentage) * min(scaled_excess * risk_scaling_factor, 1.0),
-                        max_risk_percentage
+                        T['min_risk_percentage'] + (T['max_risk_percentage'] - T['min_risk_percentage']) * min(scaled_excess * T['risk_scaling_factor'], 1.0),
+                        T['max_risk_percentage']
                     )
                     
                     # Calculate available cash (capital minus the value of open trades)
@@ -353,21 +336,17 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     #     print(f"  Trade #{len(trade_history)+1}: Capital=${capital:.2f}, Open Trades=${total_open_trade_value:.2f}, Available=${available_cash:.2f}")
                     
                     # Use available cash instead of total capital for risk calculation
-                    # print(f"risk_percentage: {risk_percentage}")
                     risk_amount = available_cash * risk_percentage
-                    # if row['Date'] >= pd.to_datetime('2025-02-01') and row['Date'] <= pd.to_datetime('2025-02-10'):
-                    #     print(f"available_cash: {available_cash}, total_open_trade_value: {total_open_trade_value}, number of open trades: {len(open_trades)}, risk_amount: {risk_amount}")
-                    # print(f"risk_amount: {risk_amount}")
                     # Calculate stop loss and take profit using hybrid ATR and predicted move approach
                     atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
                     
                     # Calculate stop loss distance using hybrid approach
-                    atr_stop_distance = atr_value * stop_loss_atr_multiplier
+                    atr_stop_distance = atr_value * T['stop_loss_atr_multiplier']
                     predicted_stop_distance = entry_price * predicted_move  # Convert predicted move to price distance
                     
                     # Weighted combination of ATR and predicted move
-                    stop_loss_distance = (atr_predicted_weight * atr_stop_distance + 
-                                        (1 - atr_predicted_weight) * predicted_stop_distance)
+                    stop_loss_distance = (T['atr_predicted_weight'] * atr_stop_distance + 
+                                        (1 - T['atr_predicted_weight']) * predicted_stop_distance)
                     
                     # Calculate fee compensation factors
                     # For stop loss: we need to account for the fact that we already paid the maker fee
@@ -380,7 +359,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     
                     # Adjust take profit to compensate for both maker and taker fees
                     # We need to reach a higher price to achieve the desired net profit
-                    target_net_profit = stop_loss_distance * risk_reward_ratio
+                    target_net_profit = stop_loss_distance * T['risk_reward_ratio']
                     # Calculate the gross price needed to achieve target net profit after fees
                     take_profit = entry_price + (target_net_profit / (maker_fee_factor * taker_fee_factor))
                     risk_per_share = entry_price - stop_loss
@@ -388,12 +367,10 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     if risk_per_share <= 0 or np.isnan(risk_per_share):
                         continue
                         
-                    # size = risk_amount / risk_per_share
                     size = risk_amount / entry_price
                     # Also limit size by available cash (not total capital)
                     size = min(size, available_cash / entry_price)
                     size = np.floor(size)
-                    # print(f"size: {size}")
                     
                     if size <= 0:
                         continue
@@ -554,6 +531,41 @@ def save_top_parameters(study, symbol):
         window_size = clamp(int(len(df) * params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
         retrain_interval = max(int(window_size * params['retrain_fraction']), 10)
         
+        # Separate trading and model parameters
+        trading_params = {
+            'min_risk_percentage': params['min_risk_percentage'],
+            'max_risk_percentage': params['max_risk_percentage'],
+            'risk_scaling_factor': params['risk_scaling_factor'],
+            'risk_reward_ratio': params['risk_reward_ratio'],
+            'min_predicted_move': params['min_predicted_move'],
+            'partial_take_profit': params['partial_take_profit'],
+            'min_holding_period': params['min_holding_period'],
+            'max_holding_period': params['max_holding_period'],
+            'max_concurrent_trades': params['max_concurrent_trades'],
+            'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
+            'atr_predicted_weight': params['atr_predicted_weight'],
+            'aggressiveness': params['aggressiveness'],
+            'window_fraction': params['window_fraction'],
+            'retrain_fraction': params['retrain_fraction'],
+            'calculated_window_size': window_size,
+            'calculated_retrain_interval': retrain_interval
+        }
+        
+        model_params = {
+            'learning_rate': params['lr'],
+            'n_estimators': params['n_estimators'],
+            'max_depth': params['max_depth'],
+            'max_leaves': params['max_leaves'],
+            'min_child_weight': params['min_child_weight'],
+            'gamma': params['gamma'],
+            'subsample': params['subsample'],
+            'colsample_bytree': params['colsample_bytree'],
+            'colsample_bylevel': params['colsample_bylevel'],
+            'reg_lambda': params['reg_lambda'],
+            'reg_alpha': params['reg_alpha'],
+            'max_bin': params['max_bin']
+        }
+        
         # Get the equity curve from trial attributes and convert back to Series
         equity_curve_dict = attrs.get('equity_curve')
         if equity_curve_dict is not None:
@@ -602,24 +614,8 @@ def save_top_parameters(study, symbol):
         params_to_save['top_parameters'].append({
             'trial_number': trial_num,
             'score': float(score),
-            'parameters': {
-                'min_risk_percentage': params['min_risk_percentage'],
-                'max_risk_percentage': params['max_risk_percentage'],
-                'risk_scaling_factor': params['risk_scaling_factor'],
-                'risk_reward_ratio': params['risk_reward_ratio'],
-                'min_predicted_move': params['min_predicted_move'],
-                'partial_take_profit': params['partial_take_profit'],
-                'min_holding_period': params['min_holding_period'],
-                'max_holding_period': params['max_holding_period'],
-                'max_concurrent_trades': params['max_concurrent_trades'],
-                'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
-                'atr_predicted_weight': params['atr_predicted_weight'],
-                'aggressiveness': params['aggressiveness'],
-                'window_fraction': params['window_fraction'],
-                'retrain_fraction': params['retrain_fraction'],
-                'calculated_window_size': window_size,
-                'calculated_retrain_interval': retrain_interval
-            },
+            'trading_parameters': trading_params,
+            'model_parameters': model_params,
             'metrics': {
                 'total_return': attrs.get('total_return', 0.0),
                 'sharpe_ratio': attrs.get('sharpe_ratio', 0.0),
@@ -633,77 +629,93 @@ def save_top_parameters(study, symbol):
     
     # Save to JSON
     os.makedirs('Parameters', exist_ok=True)
-    params_file = f'Parameters/{symbol}_Full_Optimization.json'
+    params_file = f'Parameters/{symbol}_Joint_Optimization.json'
     with open(params_file, 'w') as f:
         json.dump(params_to_save, f, indent=4)
     print(f"\nTop 10 parameters saved to {params_file}")
     print(f"Top 10 equity curve phase graphs saved to Visualization folder")
 
 def objective(trial):
-    """Objective function for Optuna optimization"""
-    # Define parameter ranges
-    min_risk = trial.suggest_float('min_risk_percentage', 0.10, 0.25)
-    max_risk = trial.suggest_float('max_risk_percentage', 0.50, 0.75)
-    scaling_factor = trial.suggest_float('risk_scaling_factor', 1.5, 3.0)
-    reward_ratio = trial.suggest_float('risk_reward_ratio', 1.5, 3.0)
-    min_predicted_move = trial.suggest_float('min_predicted_move', 0.005, 0.01)
-    window_fraction = trial.suggest_float('window_fraction', 0.01, 0.5) # 1% to 50% of the data
-    retrain_fraction = trial.suggest_float('retrain_fraction', 0.05, 1) # 5% to 100% of the window size
-    window_size = clamp(int(len(df) * window_fraction), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = max(int(window_size * retrain_fraction), 10)
-    partial_take_profit = trial.suggest_float('partial_take_profit', 0.7, 0.95)
-    min_holding_period = trial.suggest_int('min_holding_period', 5, 50)
-    max_holding_period = trial.suggest_int('max_holding_period', 60, 100)
-    max_concurrent_trades = trial.suggest_int('max_concurrent_trades', 1, 10)
-    stop_loss_atr_multiplier = trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0)
-    atr_predicted_weight = trial.suggest_float('atr_predicted_weight', 0.0, 1.0)  # 0 = all predicted, 1 = all ATR
-    aggressiveness = trial.suggest_float('aggressiveness', 0.5, 5.0)  # Controls how fast risk scales to max
+    """Objective function for Optuna joint optimization"""
+    # Define trading parameters step by step
+    
+    T = {
+        'min_risk_percentage': trial.suggest_float('min_risk_percentage', 0.10, 0.25),
+        'max_risk_percentage': trial.suggest_float('max_risk_percentage', 0.50, 0.75),
+        'risk_scaling_factor': trial.suggest_float('risk_scaling_factor', 1.5, 3.0),
+        'risk_reward_ratio': trial.suggest_float('risk_reward_ratio', 1.5, 3.0),
+        'min_predicted_move': trial.suggest_float('min_predicted_move', 0.005, 0.01),
+        'window_fraction': trial.suggest_float('window_fraction', 0.01, 0.5),  # 1% to 50% of the data
+        'retrain_fraction': trial.suggest_float('retrain_fraction', 0.05, 1),  # 5% to 100% of the window size
+        'partial_take_profit': trial.suggest_float('partial_take_profit', 0.7, 0.95),
+        'min_holding_period': trial.suggest_int('min_holding_period', 5, 50),
+        'max_holding_period': trial.suggest_int('max_holding_period', 60, 100),
+        'max_concurrent_trades': trial.suggest_int('max_concurrent_trades', 1, 10),
+        'stop_loss_atr_multiplier': trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0),
+        'atr_predicted_weight': trial.suggest_float('atr_predicted_weight', 0.0, 1.0),  # 0 = all predicted, 1 = all ATR
+        'aggressiveness': trial.suggest_float('aggressiveness', 0.5, 5.0)  # Controls how fast risk scales to max
+    }
+    
+    # Calculate derived parameters
+    window_size = clamp(int(len(df) * T['window_fraction']), MIN_WINDOW, MAX_WINDOW)
+    retrain_interval = max(int(window_size * T['retrain_fraction']), 10)
+    T['window_size'] = window_size
+    T['retrain_interval'] = retrain_interval
+
+    # Define model hyperparameters (H)
+    H = {
+        'learning_rate': trial.suggest_float("lr", 0.02, 0.12, log=True),
+        'n_estimators': trial.suggest_int("n_estimators", 300, 1400),
+        'max_depth': trial.suggest_int("max_depth", 3, 6),
+        'max_leaves': trial.suggest_int("max_leaves", 32, 128),
+        'min_child_weight': trial.suggest_float("min_child_weight", 0.5, 6.0, log=True),
+        'gamma': trial.suggest_float("gamma", 0.0, 3.0),
+        'subsample': trial.suggest_float("subsample", 0.6, 0.95),
+        'colsample_bytree': trial.suggest_float("colsample_bytree", 0.4, 0.9),
+        'colsample_bylevel': trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+        'reg_lambda': trial.suggest_float("reg_lambda", 0.5, 5.0, log=True),
+        'reg_alpha': trial.suggest_float("reg_alpha", 0.0, 2.0),
+        'max_bin': trial.suggest_int("max_bin", 256, 1024),
+        'random_state': 42,
+        'tree_method': 'hist',
+        'device': 'cpu'
+    }
     
     # Debug: Print parameters for first few trials to verify they match defaults when hardcoded
     if trial.number < 3:
         print(f"\nTrial {trial.number} parameters:")
-        print(f"  min_risk: {min_risk:.6f}")
-        print(f"  max_risk: {max_risk:.6f}")
-        print(f"  scaling_factor: {scaling_factor:.6f}")
-        print(f"  reward_ratio: {reward_ratio:.6f}")
-        print(f"  min_predicted_move: {min_predicted_move:.6f}")
-        print(f"  window_size: {window_size}")
-        print(f"  retrain_interval: {retrain_interval}")
-        print(f"  stop_loss_atr_multiplier: {stop_loss_atr_multiplier:.6f}")
-        print(f"  atr_predicted_weight: {atr_predicted_weight:.6f}")
-        print(f"  aggressiveness: {aggressiveness:.6f}")
+        print(f"  Trading Parameters (T):")
+        print(f"    min_risk: {T['min_risk_percentage']:.6f}")
+        print(f"    max_risk: {T['max_risk_percentage']:.6f}")
+        print(f"    scaling_factor: {T['risk_scaling_factor']:.6f}")
+        print(f"    reward_ratio: {T['risk_reward_ratio']:.6f}")
+        print(f"    min_predicted_move: {T['min_predicted_move']:.6f}")
+        print(f"    window_size: {T['window_size']}")
+        print(f"    retrain_interval: {T['retrain_interval']}")
+        print(f"    stop_loss_atr_multiplier: {T['stop_loss_atr_multiplier']:.6f}")
+        print(f"    atr_predicted_weight: {T['atr_predicted_weight']:.6f}")
+        print(f"    aggressiveness: {T['aggressiveness']:.6f}")
+        print(f"  Model Parameters (H):")
+        print(f"    learning_rate: {H['learning_rate']:.6f}")
+        print(f"    n_estimators: {H['n_estimators']}")
+        print(f"    max_depth: {H['max_depth']}")
+        print(f"    max_leaves: {H['max_leaves']}")
     
     # Filter data dynamically based on the actual window_size for this trial
     # This ensures we use exactly the right amount of data for each trial
     start_date = '2025-01-15'
     end_date = '2025-09-09'
-    trial_buffered_start = pd.to_datetime(start_date) - pd.Timedelta(days=window_size*15/60/24)
+    trial_buffered_start = pd.to_datetime(start_date) - pd.Timedelta(days=T['window_size']*15/60/24)
     df_trial = df[(df['Date'] >= trial_buffered_start) & (df['Date'] <= end_date)]
     
     # if trial.number < 3:
     #     print(f"  Trial data length: {len(df_trial)} bars")
     #     print(f"  Trial date range: {df_trial['Date'].min()} to {df_trial['Date'].max()}")
-    #     print(f"  Required window size: {window_size}")
-    #     print(f"  Sufficient data: {'YES' if len(df_trial) >= window_size else 'NO'}")
+    #     print(f"  Required window size: {T['window_size']}")
+    #     print(f"  Sufficient data: {'YES' if len(df_trial) >= T['window_size'] else 'NO'}")
     
     # Run strategy with current parameters and trial-specific data
-    metrics = run_strategy(df_trial, 
-                           min_risk, 
-                           max_risk, 
-                           scaling_factor, 
-                           reward_ratio, 
-                           min_predicted_move, 
-                           window_size, 
-                           retrain_interval, 
-                           partial_take_profit, 
-                           min_holding_period, 
-                           max_holding_period, 
-                           max_concurrent_trades,
-                           feature_cols, 
-                           target_cols,
-                           stop_loss_atr_multiplier,
-                           atr_predicted_weight,
-                           aggressiveness)
+    metrics = run_strategy(df_trial, T, H, feature_cols, target_cols)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -786,7 +798,6 @@ if __name__ == "__main__":
         print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
         print(f"Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
         print(f"ATR vs Predicted Weight: {DEFAULT_ATR_PREDICTED_WEIGHT}")
-        print(f"Aggressiveness: {DEFAULT_AGGRESSIVENESS}")
         print(f"Maker Fee (Buy): {MAKER_FEE*100:.1f}%")
         print(f"Taker Fee (Sell): {TAKER_FEE*100:.1f}%")
         print(f"Total Round-trip Cost: {(MAKER_FEE + TAKER_FEE)*100:.1f}%")
@@ -806,8 +817,7 @@ if __name__ == "__main__":
                                     feature_cols,
                                     target_cols,
                                     DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
-                                    DEFAULT_ATR_PREDICTED_WEIGHT,
-                                    DEFAULT_AGGRESSIVENESS)
+                                    DEFAULT_ATR_PREDICTED_WEIGHT)
         
         # Calculate composite score
         composite_score = (
@@ -824,7 +834,6 @@ if __name__ == "__main__":
             'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
             'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
             'atr_predicted_weight': DEFAULT_ATR_PREDICTED_WEIGHT,
-            'aggressiveness': DEFAULT_AGGRESSIVENESS,
             'window_size': DEFAULT_WINDOW_SIZE,
             'retrain_interval': DEFAULT_RETREIN_INTERVAL,
             'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
@@ -847,7 +856,7 @@ if __name__ == "__main__":
         print("\nRunning Optuna optimization...")
         
         # Create storage for the study
-        storage_name = f"sqlite:///DB/{symbol}_study.db"
+        storage_name = f"sqlite:///DB/{symbol}_joint_study.db"
         
         # Handle study resumption
         if RESUME_STUDY is None:
@@ -903,6 +912,41 @@ if __name__ == "__main__":
         window_size = clamp(int(len(df) * best_params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
         retrain_interval = max(int(window_size * best_params['retrain_fraction']), 10)
         
+        # Create T and H dictionaries from best parameters
+        T_best = {
+            'min_risk_percentage': best_params['min_risk_percentage'],
+            'max_risk_percentage': best_params['max_risk_percentage'],
+            'risk_scaling_factor': best_params['risk_scaling_factor'],
+            'risk_reward_ratio': best_params['risk_reward_ratio'],
+            'min_predicted_move': best_params['min_predicted_move'],
+            'partial_take_profit': best_params['partial_take_profit'],
+            'min_holding_period': best_params['min_holding_period'],
+            'max_holding_period': best_params['max_holding_period'],
+            'max_concurrent_trades': best_params['max_concurrent_trades'],
+            'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
+            'atr_predicted_weight': best_params['atr_predicted_weight'],
+            'window_size': window_size,
+            'retrain_interval': retrain_interval
+        }
+        
+        H_best = {
+            'learning_rate': best_params['lr'],
+            'n_estimators': best_params['n_estimators'],
+            'max_depth': best_params['max_depth'],
+            'max_leaves': best_params['max_leaves'],
+            'min_child_weight': best_params['min_child_weight'],
+            'gamma': best_params['gamma'],
+            'subsample': best_params['subsample'],
+            'colsample_bytree': best_params['colsample_bytree'],
+            'colsample_bylevel': best_params['colsample_bylevel'],
+            'reg_lambda': best_params['reg_lambda'],
+            'reg_alpha': best_params['reg_alpha'],
+            'max_bin': best_params['max_bin'],
+            'random_state': 42,
+            'tree_method': 'hist',
+            'device': 'cpu'
+        }
+        
         # Filter data for the best parameters using the same logic as in objective function
         best_buffered_start = pd.to_datetime(start_date) - pd.Timedelta(days=window_size*15/60/24)
         df_best = df[(df['Date'] >= best_buffered_start) & (df['Date'] <= end_date)]
@@ -913,25 +957,7 @@ if __name__ == "__main__":
         print(f"  Data length: {len(df_best)} bars")
         print(f"  Date range: {df_best['Date'].min()} to {df_best['Date'].max()}")
         
-        best_metrics = run_strategy(
-            df_best,
-            best_params['min_risk_percentage'],
-            best_params['max_risk_percentage'],
-            best_params['risk_scaling_factor'],
-            best_params['risk_reward_ratio'],
-            best_params['min_predicted_move'],
-            window_size,
-            retrain_interval,
-            best_params['partial_take_profit'],
-            best_params['min_holding_period'],
-            best_params['max_holding_period'],
-            best_params['max_concurrent_trades'],
-            feature_cols,
-            target_cols,
-            best_params['stop_loss_atr_multiplier'],
-            best_params['atr_predicted_weight'],
-            best_params['aggressiveness']
-        )
+        best_metrics = run_strategy(df_best, T_best, H_best, feature_cols, target_cols)
         
         # Calculate final composite score
         final_composite_score = (
@@ -941,6 +967,7 @@ if __name__ == "__main__":
         )
         
         results = [{
+            # Trading parameters
             'min_risk_percentage': best_params['min_risk_percentage'],
             'max_risk_percentage': best_params['max_risk_percentage'],
             'risk_scaling_factor': best_params['risk_scaling_factor'],
@@ -957,6 +984,20 @@ if __name__ == "__main__":
             'min_holding_period': best_params['min_holding_period'],
             'max_holding_period': best_params['max_holding_period'],
             'max_concurrent_trades': best_params['max_concurrent_trades'],
+            # Model parameters
+            'learning_rate': best_params['lr'],
+            'n_estimators': best_params['n_estimators'],
+            'max_depth': best_params['max_depth'],
+            'max_leaves': best_params['max_leaves'],
+            'min_child_weight': best_params['min_child_weight'],
+            'gamma': best_params['gamma'],
+            'subsample': best_params['subsample'],
+            'colsample_bytree': best_params['colsample_bytree'],
+            'colsample_bylevel': best_params['colsample_bylevel'],
+            'reg_lambda': best_params['reg_lambda'],
+            'reg_alpha': best_params['reg_alpha'],
+            'max_bin': best_params['max_bin'],
+            # Performance metrics
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
             'sharpe_ratio': best_metrics['sharpe_ratio'],
@@ -975,7 +1016,8 @@ if __name__ == "__main__":
 
     # Get best parameters
     best_params = results_df.iloc[0]
-    print("\nBest Parameters:")
+    print("\nBest Joint Optimization Parameters:")
+    print("\nTrading Parameters:")
     print(f"Min Risk: {best_params['min_risk_percentage']:.3f}")
     print(f"Max Risk: {best_params['max_risk_percentage']:.3f}")
     print(f"Risk Scaling: {best_params['risk_scaling_factor']:.2f}")
@@ -990,6 +1032,19 @@ if __name__ == "__main__":
     print(f"Min Holding Period: {best_params['min_holding_period']}")
     print(f"Max Holding Period: {best_params['max_holding_period']}")
     print(f"Max Concurrent Trades: {best_params['max_concurrent_trades']}")
+    print("\nModel Parameters:")
+    print(f"Learning Rate: {best_params['learning_rate']:.4f}")
+    print(f"N Estimators: {best_params['n_estimators']}")
+    print(f"Max Depth: {best_params['max_depth']}")
+    print(f"Max Leaves: {best_params['max_leaves']}")
+    print(f"Min Child Weight: {best_params['min_child_weight']:.3f}")
+    print(f"Gamma: {best_params['gamma']:.3f}")
+    print(f"Subsample: {best_params['subsample']:.3f}")
+    print(f"Colsample by Tree: {best_params['colsample_bytree']:.3f}")
+    print(f"Colsample by Level: {best_params['colsample_bylevel']:.3f}")
+    print(f"Reg Lambda: {best_params['reg_lambda']:.3f}")
+    print(f"Reg Alpha: {best_params['reg_alpha']:.3f}")
+    print(f"Max Bin: {best_params['max_bin']}")
     print(f"\nPerformance Metrics:")
     print(f"Total Return: {best_params['total_return']:.2f}%")
     print(f"Final Capital: ${best_params['final_capital']:,.2f}")
@@ -1053,8 +1108,8 @@ if __name__ == "__main__":
     print("Full equity curve saved to DB/charts/best_equity_curve_full.png")
 
     # Save results
-    results_df.to_csv('DB/parameter_optimization_results.csv', index=False)
-    best_params['trade_history'].to_csv('DB/best_parameter_trade_history.csv', index=False)
-    print("\nResults saved to DB/parameter_optimization_results.csv")
-    print("Best trade history saved to DB/best_parameter_trade_history.csv")
+    results_df.to_csv('DB/joint_optimization_results.csv', index=False)
+    best_params['trade_history'].to_csv('DB/best_joint_parameter_trade_history.csv', index=False)
+    print("\nResults saved to DB/joint_optimization_results.csv")
+    print("Best trade history saved to DB/best_joint_parameter_trade_history.csv")
 
