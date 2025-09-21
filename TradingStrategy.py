@@ -18,20 +18,21 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.119730020745227263
-DEFAULT_MAX_RISK = 0.529423066916484733
-DEFAULT_SCALING = 2.0908369643797564
-DEFAULT_RR = 1.6971206233235478
-DEFAULT_MIN_PREDICTED_MOVE = 0.009833451325784833
-DEFAULT_MIN_HOLDING_PERIOD = 6
-DEFAULT_MAX_HOLDING_PERIOD = 7
-DEFAULT_PARTIAL_TAKE_PROFIT = 0.807345377350049
-DEFAULT_MAX_CONCURRENT_TRADES = 10
-DEFAULT_WINDOW_SIZE = 25000
-DEFAULT_RETREIN_INTERVAL = 25000
-DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.547732908433746
-DEFAULT_ATR_PREDICTED_WEIGHT = 0.4310703192463601 # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
-DEFAULT_AGGRESSIVENESS = 2
+DEFAULT_MIN_RISK = 0.10621436917144346
+DEFAULT_MAX_RISK = 0.7406474089001399
+DEFAULT_SCALING = 1.9826763047012028
+DEFAULT_RR = 1.606483572993909
+DEFAULT_MIN_PREDICTED_MOVE = 0.008781131561703973
+DEFAULT_MIN_HOLDING_PERIOD = 13
+DEFAULT_MAX_HOLDING_PERIOD = 79
+DEFAULT_PARTIAL_TAKE_PROFIT = 0.73356304921584
+DEFAULT_MAX_CONCURRENT_TRADES = 9
+DEFAULT_WINDOW_SIZE = 35697
+DEFAULT_RETREIN_INTERVAL = 31248
+DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 2.1396518439272034
+DEFAULT_ATR_PREDICTED_WEIGHT = 0.7439320797469477 # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
+DEFAULT_AGGRESSIVENESS = 3.60283903237039
+DEFAULT_FEATURE_COUNT_K = 23
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -63,24 +64,24 @@ if USE_FAPT:
         market_weather_features[base_feature].append(stat_type)
 
 
-def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, aggressiveness=2):
+def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, aggressiveness=2, feature_count_k=23):
     """Run trading strategy with given parameters"""
     model_params = {
-        "learning_rate": 0.1081270658051096,
-        "n_estimators": 943,
-        "max_depth": 5,
-        "max_leaves": 123,
-        "min_child_weight": 0.6266777639806653,
-        "gamma": 0.1453711881569889,
-        "subsample": 0.8905128494073881,
-        "colsample_bytree": 0.4595148605371952,
-        "colsample_bylevel": 0.5233925218009232,
-        "reg_lambda": 1.4092734173101562,
-        "reg_alpha": 1.4151336617040773,
-        "max_bin": 563,
-        'random_state': 42,
-        'tree_method': 'hist',
-    }
+            "learning_rate": 0.0394442779972318,
+            "n_estimators": 1083,
+            "max_depth": 3,
+            "max_leaves": 36,
+            "min_child_weight": 0.6502554198756915,
+            "gamma": 0.24978545049426548,
+            "subsample": 0.7744787259506858,
+            "colsample_bytree": 0.40844599213496485,
+            "colsample_bylevel": 0.710999807370531,
+            "reg_lambda": 0.5670409126584627,
+            "reg_alpha": 0.5543215207345554,
+            "max_bin": 659,
+            'random_state': 42,
+            'tree_method': 'hist',
+        }
     
     # Initialize predicted change column
     df_window['Predicted_Change'] = np.nan
@@ -105,9 +106,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         initial_window, 
         feature_cols, 
         target_cols,
+        model_params=model_params,
         iterations=1,
         save_importance=False,
-        visualize_importance=False
+        visualize_importance=False,
+        K=feature_count_k
     )
     
     model = xgb.XGBRegressor(**model_params)
@@ -139,9 +142,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 feature_selection_data,
                 feature_cols,
                 target_cols,
+                model_params=model_params,
                 iterations=1,
                 save_importance=False,
-                visualize_importance=False
+                visualize_importance=False,
+                K=feature_count_k
             )
             total_data_processed = 0
         
@@ -615,6 +620,7 @@ def save_top_parameters(study, symbol):
                 'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
                 'atr_predicted_weight': params['atr_predicted_weight'],
                 'aggressiveness': params['aggressiveness'],
+                'feature_count_k': params['feature_count_k'],
                 'window_fraction': params['window_fraction'],
                 'retrain_fraction': params['retrain_fraction'],
                 'calculated_window_size': window_size,
@@ -658,6 +664,7 @@ def objective(trial):
     stop_loss_atr_multiplier = trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0)
     atr_predicted_weight = trial.suggest_float('atr_predicted_weight', 0.0, 1.0)  # 0 = all predicted, 1 = all ATR
     aggressiveness = trial.suggest_float('aggressiveness', 0.5, 5.0)  # Controls how fast risk scales to max
+    feature_count_k = trial.suggest_int('feature_count_k', 16, 64)  # Number of top features to select
     
     # Debug: Print parameters for first few trials to verify they match defaults when hardcoded
     if trial.number < 3:
@@ -672,6 +679,7 @@ def objective(trial):
         print(f"  stop_loss_atr_multiplier: {stop_loss_atr_multiplier:.6f}")
         print(f"  atr_predicted_weight: {atr_predicted_weight:.6f}")
         print(f"  aggressiveness: {aggressiveness:.6f}")
+        print(f"  feature_count_k: {feature_count_k}")
     
     # Filter data dynamically based on the actual window_size for this trial
     # This ensures we use exactly the right amount of data for each trial
@@ -703,7 +711,8 @@ def objective(trial):
                            target_cols,
                            stop_loss_atr_multiplier,
                            atr_predicted_weight,
-                           aggressiveness)
+                           aggressiveness,
+                           feature_count_k)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -807,7 +816,8 @@ if __name__ == "__main__":
                                     target_cols,
                                     DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
                                     DEFAULT_ATR_PREDICTED_WEIGHT,
-                                    DEFAULT_AGGRESSIVENESS)
+                                    DEFAULT_AGGRESSIVENESS,
+                                    DEFAULT_FEATURE_COUNT_K)  # Default feature_count_k
         
         # Calculate composite score
         composite_score = (
@@ -825,6 +835,7 @@ if __name__ == "__main__":
             'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
             'atr_predicted_weight': DEFAULT_ATR_PREDICTED_WEIGHT,
             'aggressiveness': DEFAULT_AGGRESSIVENESS,
+            'feature_count_k': DEFAULT_FEATURE_COUNT_K,
             'window_size': DEFAULT_WINDOW_SIZE,
             'retrain_interval': DEFAULT_RETREIN_INTERVAL,
             'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
@@ -862,7 +873,7 @@ if __name__ == "__main__":
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
-                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
                 )
         elif RESUME_STUDY:
             try:
@@ -875,7 +886,7 @@ if __name__ == "__main__":
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
-                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
                 )
         else:
             print("\nStarting new study...")
@@ -884,7 +895,7 @@ if __name__ == "__main__":
                 storage=storage_name,
                 direction='maximize',
                 sampler=optuna.samplers.TPESampler(seed=42),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
             )
         
         # Calculate remaining trials
@@ -930,7 +941,8 @@ if __name__ == "__main__":
             target_cols,
             best_params['stop_loss_atr_multiplier'],
             best_params['atr_predicted_weight'],
-            best_params['aggressiveness']
+            best_params['aggressiveness'],
+            best_params['feature_count_k']
         )
         
         # Calculate final composite score
@@ -951,6 +963,7 @@ if __name__ == "__main__":
             'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
             'atr_predicted_weight': best_params['atr_predicted_weight'],
             'aggressiveness': best_params['aggressiveness'],
+            'feature_count_k': best_params['feature_count_k'],
             'window_size': window_size,
             'retrain_interval': retrain_interval,
             'partial_take_profit': best_params['partial_take_profit'],
@@ -984,6 +997,7 @@ if __name__ == "__main__":
     print(f"Stop Loss ATR Multiplier: {best_params['stop_loss_atr_multiplier']:.2f}")
     print(f"ATR vs Predicted Weight: {best_params['atr_predicted_weight']:.2f}")
     print(f"Aggressiveness: {best_params['aggressiveness']:.2f}")
+    print(f"Feature Count K: {best_params['feature_count_k']}")
     print(f"Window Size: {best_params['window_size']}")
     print(f"Retrain Interval: {best_params['retrain_interval']}")
     print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")

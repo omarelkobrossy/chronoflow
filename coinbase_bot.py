@@ -38,7 +38,6 @@ class CoinbaseAPIClient:
         self.client = None
         self.model = None
         self.current_features = None
-        self.window_size = 25000
         self.maker_fee = 0.006
         self.taker_fee = 0.012
 
@@ -49,23 +48,25 @@ class CoinbaseAPIClient:
         # Incremental statistics for expanding standardization
         self.running_stats = {}  # Will store {feature: {'sum': x, 'sum_sq': x, 'count': n}}
         self.last_processed_timestamp = None
-        self.retrain_interval = 15  # Number of 15-minute intervals between retrains (15 * 15 = 225 minutes)
+        self.window_size = 35697
+        self.retrain_interval = 31248  # Number of 15-minute intervals between retrains (15 * 15 = 225 minutes)
         self.last_retrain_idx = 0
         self.last_retrain_time = None
         self.last_update_time = None
         self.trading_params = {
-            'min_risk_percentage': 0.018193997619464653,
-            'max_risk_percentage': 0.0396903321522786,
-            'risk_scaling_factor': 2.3336616807215136,#1.7429109176364634,#1.6949727011806939,
-            'risk_reward_ratio': 1.5016122471326743,#1.6037213842177254,
-            'min_predicted_move': 0.005653821215830177,#0.005113433706915217,
-            'partial_take_profit': 0.807345377350049,
-            'min_holding_period': 9,
-            'aggressiveness': 2,
-            'max_holding_period': 10,
+            'min_risk_percentage': 0.10621436917144346,
+            'max_risk_percentage': 0.7406474089001399,
+            'risk_scaling_factor': 1.9826763047012028,#1.7429109176364634,#1.6949727011806939,
+            'risk_reward_ratio': 1.606483572993909,#1.6037213842177254,
+            'min_predicted_move': 0.008781131561703973,#0.005113433706915217,
+            'partial_take_profit': 0.73356304921584,
+            'min_holding_period': 13,
+            'aggressiveness': 3.60283903237039,
+            'max_holding_period': 79,
             'max_concurrent_trades': 9,
-            'stop_loss_atr_multiplier': 3.8680612209950582,
-            'atr_predicted_weight': 0.8151555981889735,
+            'stop_loss_atr_multiplier': 2.1396518439272034,
+            'atr_predicted_weight': 0.7439320797469477,
+            'feature_top_k': 23,
         }
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
@@ -73,21 +74,20 @@ class CoinbaseAPIClient:
         self.stop_monitoring = False
         self.active_brackets = {}  # Track active bracket orders
         self.model_params = {
-            "learning_rate": 0.1081270658051096,
-            "n_estimators": 943,
-            "max_depth": 5,
-            "max_leaves": 123,
-            "min_child_weight": 0.6266777639806653,
-            "gamma": 0.1453711881569889,
-            "subsample": 0.8905128494073881,
-            "colsample_bytree": 0.4595148605371952,
-            "colsample_bylevel": 0.5233925218009232,
-            "reg_lambda": 1.4092734173101562,
-            "reg_alpha": 1.4151336617040773,
-            "max_bin": 563,
+            "learning_rate": 0.0394442779972318,
+            "n_estimators": 1083,
+            "max_depth": 3,
+            "max_leaves": 36,
+            "min_child_weight": 0.6502554198756915,
+            "gamma": 0.24978545049426548,
+            "subsample": 0.7744787259506858,
+            "colsample_bytree": 0.40844599213496485,
+            "colsample_bylevel": 0.710999807370531,
+            "reg_lambda": 0.5670409126584627,
+            "reg_alpha": 0.5543215207345554,
+            "max_bin": 659,
             'random_state': 42,
             'tree_method': 'hist',
-            'device': 'cpu'
         }
         
         if api_key and api_secret:
@@ -441,9 +441,11 @@ class CoinbaseAPIClient:
             df_processed,
             feature_cols,
             target_cols,
+            model_params=self.model_params,
             iterations=1,
             save_importance=False,
-            visualize_importance=False
+            visualize_importance=False,
+            K=self.trading_params['feature_top_k']
         )
         
         # Initialize running statistics from the in-memory dataset
@@ -545,9 +547,11 @@ class CoinbaseAPIClient:
                 df_processed,
                 feature_cols,
                 target_cols,
+                model_params=self.model_params,
                 iterations=1,
                 save_importance=False,
-                visualize_importance=False
+                visualize_importance=False,
+                K=self.trading_params['feature_top_k']
             )
         
         # Get preprocessed features and target using incremental standardization
@@ -705,7 +709,7 @@ class CoinbaseAPIClient:
         if prediction < -self.trading_params['min_predicted_move']:
             entry_price = current_price
             
-            predicted_move = abs(prediction)*3
+            predicted_move = abs(prediction)#*3
             
             # Calculate how much the predicted move exceeds the minimum threshold
             move_excess_ratio = (predicted_move - self.trading_params['min_predicted_move']) / self.trading_params['min_predicted_move']
@@ -741,8 +745,8 @@ class CoinbaseAPIClient:
             # Calculate fee compensation factors
             # For stop loss: we need to account for the fact that we already paid the maker fee
             # For take profit: we need to account for both maker fee (already paid) and taker fee (will be paid)
-            maker_fee_factor = 1 + self.trading_params['maker_fee']  # Factor to account for maker fee already paid
-            taker_fee_factor = 1 - self.trading_params['taker_fee']  # Factor to account for taker fee on exit
+            maker_fee_factor = 1 + self.maker_fee # Factor to account for maker fee already paid
+            taker_fee_factor = 1 - self.taker_fee # Factor to account for taker fee on exit
             
             # Adjust stop loss to compensate for maker fee (we already paid it, so we need less distance)
             stop_loss = entry_price - (stop_loss_distance / maker_fee_factor)
@@ -758,7 +762,7 @@ class CoinbaseAPIClient:
             if risk_per_share <= 0 or np.isnan(risk_per_share):
                 return
                 
-            size = risk_amount / risk_per_share
+            size = risk_amount / entry_price
             size = min(size, self.capital / entry_price)
             size = np.floor(size)
             

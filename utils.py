@@ -16,19 +16,19 @@ import json
 from scipy import stats
 
 # Define model parameters for feature selection
-model_params = {
-    'n_estimators': 50,
-    'max_depth': 4,
-    'learning_rate': 0.1,
-    'min_child_weight': 10,
-    'subsample': 0.7,
-    'colsample_bytree': 0.7,
-    'reg_alpha': 0.5,
-    'reg_lambda': 1.0,
-    'random_state': 42,
-    'tree_method': 'hist',
-    'device': 'cpu'  # Changed from 'cuda' to 'cpu' for consistency
-}
+# model_params = {
+#     'n_estimators': 50,
+#     'max_depth': 4,
+#     'learning_rate': 0.1,
+#     'min_child_weight': 10,
+#     'subsample': 0.7,
+#     'colsample_bytree': 0.7,
+#     'reg_alpha': 0.5,
+#     'reg_lambda': 1.0,
+#     'random_state': 42,
+#     'tree_method': 'hist',
+#     'device': 'cpu'  # Changed from 'cuda' to 'cpu' for consistency
+# }
 
 # Load the data
 symbol = "TSLA"
@@ -154,7 +154,11 @@ def preprocess_data(df):
     return df, feature_cols, target_cols
 
 
-def calculate_feature_importance(df, feature_cols, target_cols, iterations=1, save_importance=False, visualize_importance=False, importance_threshold=0.01):
+def calculate_feature_importance(df, feature_cols, target_cols, model_params=None, iterations=1, save_importance=False, visualize_importance=False, K=48):
+    # Use passed model_params or fall back to global default
+    if model_params is None:
+        model_params = globals()['model_params']
+    
     feature_importance_scores = {}
     batch_size = len(df) // iterations
     
@@ -186,18 +190,34 @@ def calculate_feature_importance(df, feature_cols, target_cols, iterations=1, sa
         model = xgb.XGBRegressor(**model_params)
         model.fit(X_train_scaled, y_train)
         
-        # Get feature importance for this batch
-        for feature, importance in zip(feature_cols, model.feature_importances_):
+        # 1) After fitting the model
+        booster = model.get_booster()
+        gain_scores = booster.get_score(importance_type="total_gain")
+        
+        # Map XGBoost feature indices (f0, f1, f2, etc.) to actual feature names
+        feature_mapping = {f"f{i}": name for i, name in enumerate(feature_cols)}
+        
+        # Convert gain_scores to use actual feature names
+        actual_gain_scores = {}
+        for f_idx, score in gain_scores.items():
+            actual_feature_name = feature_mapping.get(f_idx, f_idx)
+            actual_gain_scores[actual_feature_name] = score
+        
+        # Accumulate scores for averaging across iterations
+        for feature in feature_cols:
+            importance = actual_gain_scores.get(feature, 0.0)
             if feature not in feature_importance_scores:
                 feature_importance_scores[feature] = []
             feature_importance_scores[feature].append(importance)
 
     # Calculate average importance scores
     avg_importance = {feature: np.mean(scores) for feature, scores in feature_importance_scores.items()}
-    feature_importance = pd.DataFrame({
-        'Feature': list(avg_importance.keys()),
-        'Importance': list(avg_importance.values())
-    }).sort_values('Importance', ascending=False)
+    
+    # build importance df from gain_scores
+    feature_importance = pd.DataFrame([
+        {"Feature": f, "Importance": avg_importance.get(f, 0.0)}
+        for f in feature_cols
+    ]).sort_values("Importance", ascending=False)
 
     if save_importance:
         # Save selected features and their importance scores to JSON
@@ -206,12 +226,11 @@ def calculate_feature_importance(df, feature_cols, target_cols, iterations=1, sa
         features_to_save = {
             feature: float(importance)  # Convert numpy.float64 to Python float for JSON serialization
             for feature, importance in zip(feature_importance['Feature'], feature_importance['Importance'])
-            if importance > importance_threshold  # Only include features above threshold
         }
         with open(features_file, 'w') as f:
             json.dump(features_to_save, f, indent=4)
             print(f"\nFeatures and importance scores saved to {features_file}")
-            print(f"Saved {len(features_to_save)} features with importance > {importance_threshold}")
+            print(f"Saved {len(features_to_save)} features")
     
     if visualize_importance:
         # Plot feature importance
@@ -223,13 +242,8 @@ def calculate_feature_importance(df, feature_cols, target_cols, iterations=1, sa
         plt.savefig("DB/charts/feature_importance.png")
         print("Feature importance chart saved to DB/charts/feature_importance.png")
 
-    # Select top features based on average importance
-    selected_features = feature_importance[feature_importance['Importance'] > importance_threshold]['Feature'].tolist()
-    
-    # If less than 3 features meet the threshold, take the top 3 features
-    if len(selected_features) < 3:
-        selected_features = feature_importance['Feature'].head(3).tolist()
-        print(f"\nWarning: Less than 3 features met the importance threshold. Using top 3 features instead.")
+    # 2) Pick top-K instead of threshold
+    selected_features = feature_importance.head(K)['Feature'].tolist()
     
     print(f"\nSelected {len(selected_features)} features based on expanding window importance analysis")
     
@@ -441,3 +455,19 @@ def analyze_window_features(df_window):
             feature_metrics[col] = metrics
     
     return feature_metrics
+
+
+def send_telegram_message(message: str):
+    """
+    Sends a message to a Telegram chat using a bot.
+
+    :param chat_id: The chat ID of the recipient (can be a user or group ID)
+    :param message: The text message to send
+    """
+    url = f"https://api.telegram.org/botREDACTED_TELEGRAM_TOKEN/sendMessage"
+    payload = {
+        "chat_id": REDACTED_CHAT_ID,
+        "text": message
+    }
+    response = requests.post(url, data=payload)
+    return response.json()

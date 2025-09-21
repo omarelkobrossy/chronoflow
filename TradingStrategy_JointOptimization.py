@@ -88,9 +88,11 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
         initial_window, 
         feature_cols, 
         target_cols,
+        model_params=H,
         iterations=1,
         save_importance=False,
-        visualize_importance=False
+        visualize_importance=False,
+        K=T['feature_count_k']
     )
     
     model = xgb.XGBRegressor(**H)
@@ -122,9 +124,11 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
                 feature_selection_data,
                 feature_cols,
                 target_cols,
+                model_params=H,
                 iterations=1,
                 save_importance=False,
-                visualize_importance=False
+                visualize_importance=False,
+                K=T['feature_count_k']
             )
             total_data_processed = 0
         
@@ -545,6 +549,7 @@ def save_top_parameters(study, symbol):
             'stop_loss_atr_multiplier': params['stop_loss_atr_multiplier'],
             'atr_predicted_weight': params['atr_predicted_weight'],
             'aggressiveness': params['aggressiveness'],
+            'feature_count_k': params['feature_count_k'],
             'window_fraction': params['window_fraction'],
             'retrain_fraction': params['retrain_fraction'],
             'calculated_window_size': window_size,
@@ -653,7 +658,8 @@ def objective(trial):
         'max_concurrent_trades': trial.suggest_int('max_concurrent_trades', 1, 10),
         'stop_loss_atr_multiplier': trial.suggest_float('stop_loss_atr_multiplier', 0.5, 4.0),
         'atr_predicted_weight': trial.suggest_float('atr_predicted_weight', 0.0, 1.0),  # 0 = all predicted, 1 = all ATR
-        'aggressiveness': trial.suggest_float('aggressiveness', 0.5, 5.0)  # Controls how fast risk scales to max
+        'aggressiveness': trial.suggest_float('aggressiveness', 0.5, 5.0),  # Controls how fast risk scales to max
+        'feature_count_k': trial.suggest_int('feature_count_k', 16, 64)  # Number of top features to select
     }
     
     # Calculate derived parameters
@@ -871,7 +877,7 @@ if __name__ == "__main__":
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
-                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
                 )
         elif RESUME_STUDY:
             try:
@@ -884,7 +890,7 @@ if __name__ == "__main__":
                     storage=storage_name,
                     direction='maximize',
                     sampler=optuna.samplers.TPESampler(seed=42),
-                    pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
                 )
         else:
             print("\nStarting new study...")
@@ -893,7 +899,7 @@ if __name__ == "__main__":
                 storage=storage_name,
                 direction='maximize',
                 sampler=optuna.samplers.TPESampler(seed=42),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=5)
             )
         
         # Calculate remaining trials
@@ -978,6 +984,7 @@ if __name__ == "__main__":
             'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
             'atr_predicted_weight': best_params['atr_predicted_weight'],
             'aggressiveness': best_params['aggressiveness'],
+            'feature_count_k': best_params['feature_count_k'],
             'window_size': window_size,
             'retrain_interval': retrain_interval,
             'partial_take_profit': best_params['partial_take_profit'],
@@ -1026,6 +1033,7 @@ if __name__ == "__main__":
     print(f"Stop Loss ATR Multiplier: {best_params['stop_loss_atr_multiplier']:.2f}")
     print(f"ATR vs Predicted Weight: {best_params['atr_predicted_weight']:.2f}")
     print(f"Aggressiveness: {best_params['aggressiveness']:.2f}")
+    print(f"Feature Count K: {best_params['feature_count_k']}")
     print(f"Window Size: {best_params['window_size']}")
     print(f"Retrain Interval: {best_params['retrain_interval']}")
     print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")
