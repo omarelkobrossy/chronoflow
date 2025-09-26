@@ -70,9 +70,6 @@ class CoinbaseAPIClient:
         }
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
-        self.order_monitor_thread = None
-        self.stop_monitoring = False
-        self.active_brackets = {}  # Track active bracket orders
         self.model_params = {
             "learning_rate": 0.0394442779972318,
             "n_estimators": 1083,
@@ -318,87 +315,6 @@ class CoinbaseAPIClient:
             print(f"Error updating capital: {e}")
             return False
     
-    def monitor_bracket_orders(self):
-        """Monitor bracket orders and check their status"""
-        while not self.stop_monitoring:
-            try:
-                # Check each active bracket
-                for bracket_id, bracket_info in list(self.active_brackets.items()):
-                    order_id = bracket_info['order_id']
-                    created_time = bracket_info.get('created_time', 0)
-                    
-                    # Add grace period for new orders (30 seconds)
-                    if time.time() - created_time < 30:
-                        continue  # Skip checking orders that are less than 30 seconds old
-                    
-                    order_status = 'UNKNOWN'
-                    
-                    # Check if order is filled or cancelled
-                    try:
-                        order = self.client.get_order(order_id)
-                        order_status = getattr(order, 'status', 'UNKNOWN')
-                        
-                        if order_status == 'FILLED':
-                            print(f"Order {order_id} filled (either stop loss or take profit triggered)")
-                            del self.active_brackets[bracket_id]
-                            continue
-                        elif order_status in ['CANCELLED', 'EXPIRED']:
-                            print(f"Order {order_id} was cancelled/expired, removing from monitoring")
-                            del self.active_brackets[bracket_id]
-                            continue
-                        else:
-                            # Order is still active, check if we should cancel it due to max holding period
-                            try:
-                                order_details = self.client.get_order(order_id)
-                                if hasattr(order_details, 'created_time'):
-                                    created_time = datetime.fromisoformat(order_details.created_time.replace('Z', '+00:00'))
-                                    holding_period = (datetime.now(timezone.utc) - created_time).total_seconds() / 60
-                                    
-                                    if holding_period >= self.trading_params['max_holding_period']:
-                                        print(f"Cancelling old order {order_id} (held for {holding_period:.1f} minutes)")
-                                        self.client.cancel_orders([order_id])
-                                        del self.active_brackets[bracket_id]
-                                        continue
-                            except Exception as e:
-                                print(f"Error checking order holding period {order_id}: {e}")
-                                
-                    except Exception as e:
-                        if "NOT_FOUND" in str(e):
-                            # Only log once per bracket to reduce noise
-                            if bracket_id in getattr(self, '_logged_not_found', set()):
-                                del self.active_brackets[bracket_id]
-                                continue
-                            else:
-                                if not hasattr(self, '_logged_not_found'):
-                                    self._logged_not_found = set()
-                                self._logged_not_found.add(bracket_id)
-                                print(f"Order {order_id} not found (likely already filled/cancelled), removing bracket {bracket_id}")
-                                del self.active_brackets[bracket_id]
-                                continue
-                        else:
-                            print(f"Error checking order {order_id}: {e}")
-                
-                # Sleep for 10 seconds before next check
-                time.sleep(10)
-                
-            except Exception as e:
-                print(f"Error in bracket order monitor: {e}")
-                time.sleep(10)
-    
-    def start_order_monitor(self):
-        """Start the order monitoring thread"""
-        if self.order_monitor_thread is None or not self.order_monitor_thread.is_alive():
-            self.stop_monitoring = False
-            self.order_monitor_thread = threading.Thread(target=self.monitor_bracket_orders, daemon=True)
-            self.order_monitor_thread.start()
-            print("Order monitoring thread started")
-    
-    def stop_order_monitor(self):
-        """Stop the order monitoring thread"""
-        self.stop_monitoring = True
-        if self.order_monitor_thread and self.order_monitor_thread.is_alive():
-            self.order_monitor_thread.join(timeout=5)
-            print("Order monitoring thread stopped")
     
     def get_orders(self, status='OPEN'):
         """Fetch current orders"""
@@ -725,12 +641,7 @@ class CoinbaseAPIClient:
             )
             
             risk_amount = self.capital * risk_percentage
-            
-            # Calculate stop loss and take profit based on risk_reward_ratio only
-            # # Use a fixed percentage for stop loss, then calculate take profit based on risk_reward_ratio
-            # stop_loss_percentage = 0.01  # 1% stop loss from entry price
-            # stop_loss = entry_price * (1 - stop_loss_percentage)
-            # take_profit = entry_price * (1 + (stop_loss_percentage * self.trading_params['risk_reward_ratio']))
+
 
             # Calculate stop loss and take profit using hybrid ATR and predicted move approach
             atr_value = self.historical_data['ATR'].iloc[-1]# if 'ATR' in self.historical_data else entry_price * 0.01  # Fallback to 1% if ATR not available
@@ -741,31 +652,26 @@ class CoinbaseAPIClient:
             
             # Weighted combination of ATR and predicted move
             stop_loss_distance = (self.trading_params['atr_predicted_weight'] * atr_stop_distance + 
-                                (1 - atr_predicted_weight) * predicted_stop_distance)
-            # Calculate fee compensation factors
-            # For stop loss: we need to account for the fact that we already paid the maker fee
-            # For take profit: we need to account for both maker fee (already paid) and taker fee (will be paid)
-            maker_fee_factor = 1 + self.maker_fee # Factor to account for maker fee already paid
-            taker_fee_factor = 1 - self.taker_fee # Factor to account for taker fee on exit
-            
-            # Adjust stop loss to compensate for maker fee (we already paid it, so we need less distance)
-            stop_loss = entry_price - (stop_loss_distance / maker_fee_factor)
-            
-            # Adjust take profit to compensate for both maker and taker fees
-            # We need to reach a higher price to achieve the desired net profit
-            target_net_profit = stop_loss_distance * self.trading_params['risk_reward_ratio']
-            # Calculate the gross price needed to achieve target net profit after fees
-            take_profit = entry_price + (target_net_profit / (maker_fee_factor * taker_fee_factor))
+                                (1 - self.trading_params['atr_predicted_weight']) * predicted_stop_distance)
 
-            risk_per_share = entry_price - stop_loss
-            
-            if risk_per_share <= 0 or np.isnan(risk_per_share):
-                return
-                
-            size = risk_amount / entry_price
-            size = min(size, self.capital / entry_price)
+
+            # Calculate fee compensation factors
+            P_in = current_price
+            f_e = self.taker_fee
+            f_tp = self.maker_fee
+            f_sl = self.taker_fee
+
+            P_sl = (P_in * (1 + f_e) - stop_loss_distance) / (1 - f_sl)
+
+            T_rr = stop_loss_distance * self.trading_params['risk_reward_ratio']
+            T = T_rr
+
+            P_tp = (P_in * (1 + f_e) + T) / (1 - f_tp)
+
+            size = risk_amount / P_in
+            size = min(size, self.capital / P_in)
             size = np.floor(size)
-            
+                    
             if size <= 0:
                 return
                 
@@ -776,13 +682,12 @@ class CoinbaseAPIClient:
                 
                 # Calculate expected XRP amount for the bracket order
                 rounded_quote_size = round(risk_amount, 4)
-                calculated_xrp = rounded_quote_size / current_price
-                print(f"Expected XRP amount: {calculated_xrp:.4f} XRP")
+                print(f"Expected XRP amount: {rounded_quote_size:.4f} XRP")
                 
                 # Place market buy order with attached bracket order configuration
                 # Round prices to 4 decimal places for Coinbase precision requirements
-                rounded_stop_loss = round(stop_loss, 4)
-                rounded_take_profit = round(take_profit, 4)
+                rounded_stop_loss = round(P_sl, 4)
+                rounded_take_profit = round(P_tp, 4)
                 
                 print(f"Placing market buy order with attached bracket configuration:")
                 print(f"  - Stop trigger price: ${rounded_stop_loss:.4f}")
@@ -807,22 +712,12 @@ class CoinbaseAPIClient:
                 )
                 print(order_response)
                 
-                # Add order to monitoring system (with delay to allow orders to propagate)
-                bracket_id = f"bracket_{buy_order_id}"
-                self.active_brackets[bracket_id] = {
-                    'order_id': buy_order_id,  # The main order ID
-                    'entry_price': entry_price,
-                    'xrp_amount': calculated_xrp,
-                    'stop_trigger_price': rounded_stop_loss,
-                    'take_profit_price': rounded_take_profit,
-                    'created_time': time.time()  # Track when bracket was created
-                }
                 
                 # Store trade info for logging (but don't use self.open_trades since we use persistent orders)
                 trade_info = {
                     'entry_price': entry_price,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit,
+                    'stop_loss': P_sl,
+                    'take_profit': P_tp,
                     'size': size,
                     'entry_time': datetime.now(),
                     'order_response': order_response,
@@ -833,7 +728,7 @@ class CoinbaseAPIClient:
                 print(f"  Entry: ${entry_price:.4f}")
                 print(f"  Stop Trigger: ${rounded_stop_loss:.4f}")
                 print(f"  Take Profit: ${rounded_take_profit:.4f}")
-                print(f"  Size: {calculated_xrp:.2f}")
+                print(f"  Size: {size:.2f}")
                 print(f"  Order ID: {buy_order_id} (added to monitoring)")
                 
                 # Update capital from account after placing trade
@@ -1479,7 +1374,7 @@ class CoinbaseAPIClient:
         print(f"DEBUG: sync_with_account_orders() returned: {sync_result}")
         
         # Start the order monitoring thread
-        self.start_order_monitor()
+        #self.start_order_monitor()
         
         # Initialize model (uses full in-memory dataset)
         self.initialize_model()
@@ -1617,47 +1512,64 @@ class CoinbaseAPIClient:
     def get_multiple_candles(self, product_id, target_candles=350, granularity='FIFTEEN_MINUTE'):
         """
         Fetch candles (API limit is 350, so we use 350 to be safe)
+        Includes retry logic for when no candles are found
         
         Args:
             product_id: Trading pair (e.g., 'XRP-USD')
             target_candles: Number of candles to fetch (max 350 due to API limit)
             granularity: Candle size
         """
-        all_candles = []
-        end_time = datetime.now(timezone.utc)
+        max_retries = 3
+        retry_delay = 3  # seconds
         
-        # Calculate time range for target candles
-        # For 15-minute candles, each candle is 15 minutes
-        minutes_per_candle = 15 if granularity == 'FIFTEEN_MINUTE' else 60
-        total_minutes = target_candles * minutes_per_candle
-        
-        start_time = end_time - timedelta(minutes=total_minutes)
-        
-        # Format timestamps as Unix timestamps
-        start_timestamp = int(start_time.timestamp())
-        end_timestamp = int(end_time.timestamp())
-        
-        print(f"Fetching {target_candles} candles from {start_time.strftime('%Y-%m-%dT%H:%M:%SZ')} to {end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}")
-        print(f"Unix timestamps: {start_timestamp} to {end_timestamp}")
-        
-        try:
-            candles = self.get_product_candles(
-                product_id=product_id,
-                start=start_timestamp,
-                end=end_timestamp,
-                granularity=granularity
-            )
+        for attempt in range(max_retries):
+            all_candles = []
+            end_time = datetime.now(timezone.utc)
             
-            if candles:
-                print(f"Fetched {len(candles)} candles")
-                return candles
-            else:
-                print("No candles returned")
-                return []
+            # Calculate time range for target candles
+            # For 15-minute candles, each candle is 15 minutes
+            minutes_per_candle = 15 if granularity == 'FIFTEEN_MINUTE' else 60
+            total_minutes = target_candles * minutes_per_candle
+            
+            start_time = end_time - timedelta(minutes=total_minutes)
+            
+            # Format timestamps as Unix timestamps
+            start_timestamp = int(start_time.timestamp())
+            end_timestamp = int(end_time.timestamp())
+            
+            print(f"Fetching {target_candles} candles from {start_time.strftime('%Y-%m-%dT%H:%M:%SZ')} to {end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+            print(f"Unix timestamps: {start_timestamp} to {end_timestamp}")
+            
+            try:
+                candles = self.get_product_candles(
+                    product_id=product_id,
+                    start=start_timestamp,
+                    end=end_timestamp,
+                    granularity=granularity
+                )
                 
-        except Exception as e:
-            print(f"Error fetching candles: {e}")
-            return []
+                if candles and len(candles) > 0:
+                    print(f"Fetched {len(candles)} candles")
+                    return candles
+                else:
+                    print(f"No candles returned (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        print(f"Waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print("Max retries reached, returning empty list")
+                        return []
+                        
+            except Exception as e:
+                print(f"Error fetching candles (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    print(f"Waiting {retry_delay} seconds before retry...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("Max retries reached, returning empty list")
+                    return []
 
 def convert_coinbase_candles_to_dataframe(candles_data):
     """

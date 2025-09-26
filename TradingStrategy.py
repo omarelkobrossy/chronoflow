@@ -18,21 +18,21 @@ import scipy.stats
 symbol = "XRP_USD"
 
 # Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.10621436917144346
-DEFAULT_MAX_RISK = 0.7406474089001399
-DEFAULT_SCALING = 1.9826763047012028
-DEFAULT_RR = 1.606483572993909
-DEFAULT_MIN_PREDICTED_MOVE = 0.008781131561703973
-DEFAULT_MIN_HOLDING_PERIOD = 13
-DEFAULT_MAX_HOLDING_PERIOD = 79
-DEFAULT_PARTIAL_TAKE_PROFIT = 0.73356304921584
-DEFAULT_MAX_CONCURRENT_TRADES = 9
-DEFAULT_WINDOW_SIZE = 35697
-DEFAULT_RETREIN_INTERVAL = 31248
-DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 2.1396518439272034
-DEFAULT_ATR_PREDICTED_WEIGHT = 0.7439320797469477 # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
-DEFAULT_AGGRESSIVENESS = 3.60283903237039
-DEFAULT_FEATURE_COUNT_K = 23
+DEFAULT_MIN_RISK = 0.10156706168296842
+DEFAULT_MAX_RISK = 0.560968740215892
+DEFAULT_SCALING = 1.997729935382857
+DEFAULT_RR = 1.5028679530064106
+DEFAULT_MIN_PREDICTED_MOVE = 0.008826652470759522
+DEFAULT_MIN_HOLDING_PERIOD = 6
+DEFAULT_MAX_HOLDING_PERIOD = 83
+DEFAULT_PARTIAL_TAKE_PROFIT = 0.7309628950065246
+DEFAULT_MAX_CONCURRENT_TRADES = 10
+DEFAULT_WINDOW_SIZE = 27936
+DEFAULT_RETREIN_INTERVAL = 18606
+DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.547732908433746
+DEFAULT_ATR_PREDICTED_WEIGHT = 0.4310703192463601 # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
+DEFAULT_AGGRESSIVENESS = 2.3603634486172083
+DEFAULT_FEATURE_COUNT_K = 32
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -67,18 +67,18 @@ if USE_FAPT:
 def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scaling_factor, risk_reward_ratio, min_predicted_move, window_size, retrain_interval, partial_take_profit, min_holding_period, max_holding_period, max_concurrent_trades, feature_cols, target_cols, stop_loss_atr_multiplier=1.5, atr_predicted_weight=0.6, aggressiveness=2, feature_count_k=23):
     """Run trading strategy with given parameters"""
     model_params = {
-            "learning_rate": 0.0394442779972318,
-            "n_estimators": 1083,
+            "learning_rate": 0.03005642076836405,
+            "n_estimators": 968,
             "max_depth": 3,
-            "max_leaves": 36,
-            "min_child_weight": 0.6502554198756915,
-            "gamma": 0.24978545049426548,
-            "subsample": 0.7744787259506858,
-            "colsample_bytree": 0.40844599213496485,
-            "colsample_bylevel": 0.710999807370531,
-            "reg_lambda": 0.5670409126584627,
-            "reg_alpha": 0.5543215207345554,
-            "max_bin": 659,
+            "max_leaves": 127,
+            "min_child_weight": 2.1107014853533137,
+            "gamma": 0.005291390227408434,
+            "subsample": 0.7153869354301697,
+            "colsample_bytree": 0.875134069516763,
+            "colsample_bylevel": 0.7188483265723933,
+            "reg_lambda": 0.5552472488751153,
+            "reg_alpha": 0.020920311615052256,
+            "max_bin": 312,
             'random_state': 42,
             'tree_method': 'hist',
         }
@@ -236,11 +236,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 
                 if high >= trade['take_profit']:
                     exit_price = trade['take_profit'] * (1 - SLIPPAGE)
-                    # Calculate profit with Taker fee (1.2% deducted from sale value)
+                    # Calculate profit with Maker fee (0.6% deducted from sale value)
                     gross_profit = (exit_price - trade['entry_price']) * trade['size']
                     sale_value = exit_price * trade['size']
-                    taker_fee_amount = sale_value * TAKER_FEE
-                    profit = gross_profit - taker_fee_amount
+                    maker_fee_amount = sale_value * MAKER_FEE
+                    profit = gross_profit - maker_fee_amount
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
@@ -251,11 +251,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     closed_trades.append(trade)
                 elif low <= trade['stop_loss']:
                     exit_price = trade['stop_loss'] * (1 - SLIPPAGE)
-                    # Calculate profit with Taker fee (1.2% deducted from sale value)
+                    # Calculate profit with Maker fee (0.6% deducted from sale value)
                     gross_profit = (exit_price - trade['entry_price']) * trade['size']
                     sale_value = exit_price * trade['size']
-                    taker_fee_amount = sale_value * TAKER_FEE
-                    profit = gross_profit - taker_fee_amount
+                    maker_fee_amount = sale_value * MAKER_FEE
+                    profit = gross_profit - maker_fee_amount
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
@@ -268,16 +268,16 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     projected_tp = trade['take_profit']
                     projected_entry = trade['entry_price']
                     # Calculate partial take profit with fee compensation
-                    # The partial TP should be adjusted to account for the taker fee
-                    taker_fee_factor = 1 - TAKER_FEE
-                    tp_partial = projected_entry + partial_take_profit * (projected_tp - projected_entry) / taker_fee_factor
+                    # The partial TP should be adjusted to account for the maker fee
+                    maker_fee_factor = 1 - MAKER_FEE
+                    tp_partial = projected_entry + partial_take_profit * (projected_tp - projected_entry) / maker_fee_factor
                     if high >= tp_partial:
                         exit_price = tp_partial * (1 - SLIPPAGE)
-                        # Calculate profit with Taker fee (1.2% deducted from sale value)
+                        # Calculate profit with Maker fee (0.6% deducted from sale value)
                         gross_profit = (exit_price - trade['entry_price']) * trade['size']
                         sale_value = exit_price * trade['size']
-                        taker_fee_amount = sale_value * TAKER_FEE
-                        profit = gross_profit - taker_fee_amount
+                        maker_fee_amount = sale_value * MAKER_FEE
+                        profit = gross_profit - maker_fee_amount
                         # Only add the profit/loss to capital
                         capital += profit
                         trade['exit_idx'] = idx
@@ -288,11 +288,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         closed_trades.append(trade)
                     elif low <= projected_entry:
                         exit_price = projected_entry * (1 - SLIPPAGE)
-                        # Calculate profit with Taker fee (1.2% deducted from sale value)
+                        # Calculate profit with Maker fee (0.6% deducted from sale value)
                         gross_profit = (exit_price - trade['entry_price']) * trade['size']
                         sale_value = exit_price * trade['size']
-                        taker_fee_amount = sale_value * TAKER_FEE
-                        profit = gross_profit - taker_fee_amount
+                        maker_fee_amount = sale_value * MAKER_FEE
+                        profit = gross_profit - maker_fee_amount
                         # Only add the profit/loss to capital
                         capital += profit
                         trade['exit_idx'] = idx
@@ -304,11 +304,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 
                 if holding_period >= max_holding_period and trade not in closed_trades:
                     exit_price = row['Close'] * (1 - SLIPPAGE)
-                    # Calculate profit with Taker fee (1.2% deducted from sale value)
+                    # Calculate profit with Maker fee (0.6% deducted from sale value)
                     gross_profit = (exit_price - trade['entry_price']) * trade['size']
                     sale_value = exit_price * trade['size']
-                    taker_fee_amount = sale_value * TAKER_FEE
-                    profit = gross_profit - taker_fee_amount
+                    maker_fee_amount = sale_value * MAKER_FEE
+                    profit = gross_profit - maker_fee_amount
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
@@ -375,55 +375,46 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                                         (1 - atr_predicted_weight) * predicted_stop_distance)
                     
                     # Calculate fee compensation factors
-                    # For stop loss: we need to account for the fact that we already paid the maker fee
-                    # For take profit: we need to account for both maker fee (already paid) and taker fee (will be paid)
-                    maker_fee_factor = 1 + MAKER_FEE  # Factor to account for maker fee already paid
-                    taker_fee_factor = 1 - TAKER_FEE  # Factor to account for taker fee on exit
-                    
-                    # Adjust stop loss to compensate for maker fee (we already paid it, so we need less distance)
-                    stop_loss = entry_price - (stop_loss_distance / maker_fee_factor)
-                    
-                    # Adjust take profit to compensate for both maker and taker fees
-                    # We need to reach a higher price to achieve the desired net profit
-                    target_net_profit = stop_loss_distance * risk_reward_ratio
-                    # Calculate the gross price needed to achieve target net profit after fees
-                    take_profit = entry_price + (target_net_profit / (maker_fee_factor * taker_fee_factor))
-                    risk_per_share = entry_price - stop_loss
-                    
-                    if risk_per_share <= 0 or np.isnan(risk_per_share):
-                        continue
-                        
-                    # size = risk_amount / risk_per_share
-                    size = risk_amount / entry_price
-                    # Also limit size by available cash (not total capital)
-                    size = min(size, available_cash / entry_price)
+                    P_in = entry_price
+                    f_e = TAKER_FEE
+                    f_tp = MAKER_FEE
+                    f_sl = TAKER_FEE
+
+                    P_sl = (P_in * (1 + f_e) - stop_loss_distance) / (1 - f_sl)
+
+                    T_rr = stop_loss_distance * risk_reward_ratio
+                    #T = T_rr
+
+                    P_tp = (P_in * (1 + f_e) + T_rr) / (1 - f_tp)
+
+                    size = risk_amount / P_in
+                    size = min(size, available_cash / P_in)
                     size = np.floor(size)
-                    # print(f"size: {size}")
-                    
+
                     if size <= 0:
                         continue
                     
-                    # Calculate trade value with Maker fee (0.6% added to trade value)
+                    # Calculate trade value with taker fee (1.2% added to trade value)
                     base_trade_value = entry_price * size
-                    maker_fee_amount = base_trade_value * MAKER_FEE
-                    trade_value = base_trade_value + maker_fee_amount
+                    taker_fee_amount = base_trade_value * TAKER_FEE
+                    trade_value = base_trade_value + taker_fee_amount
                     
                     # Final check: ensure we don't exceed available cash
                     if trade_value > available_cash:
                         # Reduce size to fit available cash
-                        max_base_value = available_cash / (1 + MAKER_FEE)
+                        max_base_value = available_cash / (1 - TAKER_FEE)
                         size = np.floor(max_base_value / entry_price)
                         if size <= 0:
                             continue
                         base_trade_value = entry_price * size
-                        maker_fee_amount = base_trade_value * MAKER_FEE
-                        trade_value = base_trade_value + maker_fee_amount
+                        taker_fee_amount = base_trade_value * TAKER_FEE
+                        trade_value = base_trade_value + taker_fee_amount
                         
                     open_trades.append({
                         'entry_idx': idx,
                         'entry_price': entry_price,
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit,
+                        'stop_loss': P_sl,
+                        'take_profit': P_tp,
                         'size': size,
                         'capital_at_entry': capital,  # Store current capital
                         'trade_value': trade_value,  # Store the value of the trade
@@ -441,7 +432,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                 # Calculate current value of open trade based on current price
                 current_price = row['Close']
                 trade_current_value = current_price * trade['size']
-                # P&L from entry (trade_value already includes Maker fee)
+                # P&L from entry (trade_value already includes taker fee)
                 trade_pnl = trade_current_value - trade['trade_value']
                 total_portfolio_value += trade_pnl
             
@@ -451,11 +442,11 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     # Close any remaining open trades
     for trade in open_trades:
         exit_price = df_window.iloc[-1]['Close'] * (1 - SLIPPAGE)
-        # Calculate profit with Taker fee (1.2% deducted from sale value)
+        # Calculate profit with Maker fee (0.6% deducted from sale value)
         gross_profit = (exit_price - trade['entry_price']) * trade['size']
         sale_value = exit_price * trade['size']
-        taker_fee_amount = sale_value * TAKER_FEE
-        profit = gross_profit - taker_fee_amount
+        maker_fee_amount = sale_value * MAKER_FEE
+        profit = gross_profit - maker_fee_amount
         # Only add the profit/loss to capital
         capital += profit
         trade['exit_idx'] = len(df_window) - 1
@@ -472,7 +463,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
             # Calculate final value of any remaining open trades
             final_price = df_window.iloc[-1]['Close']
             trade_final_value = final_price * trade['size']
-            # P&L from entry (trade_value already includes Maker fee)
+            # P&L from entry (trade_value already includes taker fee)
             trade_pnl = trade_final_value - trade['trade_value']
             final_portfolio_value += trade_pnl
         
@@ -487,7 +478,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
     for trade in open_trades:
         final_price = df_window.iloc[-1]['Close']
         trade_final_value = final_price * trade['size']
-        # P&L from entry (trade_value already includes Maker fee)
+        # P&L from entry (trade_value already includes taker fee)
         trade_pnl = trade_final_value - trade['trade_value']
         final_portfolio_value += trade_pnl
     
