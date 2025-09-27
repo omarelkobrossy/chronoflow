@@ -660,6 +660,13 @@ class CoinbaseAPIClient:
             f_e = self.taker_fee
             f_tp = self.maker_fee
             f_sl = self.taker_fee
+            
+            # Calculate minimum stop loss distance to cover fees
+            # T_floor = P_in * (f_e + f_sl) ensures we don't lose money on fees
+            T_floor = P_in * (f_e + f_sl)
+            
+            if stop_loss_distance < T_floor:
+                return
 
             P_sl = (P_in * (1 + f_e) - stop_loss_distance) / (1 - f_sl)
 
@@ -667,13 +674,11 @@ class CoinbaseAPIClient:
             T = T_rr
 
             P_tp = (P_in * (1 + f_e) + T) / (1 - f_tp)
+            P_be_tp = P_in * (1 + f_e) / (1 - f_tp)
 
-            size = risk_amount / P_in
-            size = min(size, self.capital / P_in)
-            size = np.floor(size)
+            size = min(risk_amount / entry_price, self.capital / entry_price)
                     
-            if size <= 0:
-                return
+            if size <= 0: return
                 
             # Place the order using Coinbase API with automatic stop loss and take profit
             try:
