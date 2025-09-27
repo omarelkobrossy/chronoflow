@@ -806,7 +806,7 @@ def objective(trial):
     #     print(f"  Sufficient data: {'YES' if len(df_trial) >= T['window_size'] else 'NO'}")
     
     # Run strategy with current parameters and trial-specific data
-    metrics = run_strategy(df_trial, T_default, H_default, feature_cols, target_cols)
+    metrics = run_strategy(df_trial, T, H, feature_cols, target_cols)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
