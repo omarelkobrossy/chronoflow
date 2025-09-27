@@ -323,6 +323,37 @@ def calculate_mar(cagr, max_drawdown):
     
     return mar
 
+def calculate_composite_score(mar, win_rate):
+    """
+    Calculate composite score that balances risk-adjusted returns and consistency
+    
+    Composite Score = MAR × win_rate_adj
+    
+    Where:
+    - MAR = CAGR / |Max Drawdown| (risk-adjusted return ratio)
+    - win_rate_adj = max(0, (win_rate - 50)/50) (penalizes win rates below 50%)
+    
+    This scoring system balances both risk-adjusted returns and consistency,
+    ensuring that optimization favors strategies that not only have good returns 
+    relative to their risk but also maintain reasonable win rates above 50%.
+    
+    Args:
+        mar: Managed Account Ratio (CAGR / |Max Drawdown|)
+        win_rate: Win rate as percentage (e.g., 60.0 for 60%)
+    
+    Returns:
+        Composite score (higher is better)
+    """
+    # Calculate win rate adjustment factor
+    # Win rates below 50% get penalized (factor = 0)
+    # Win rates above 50% get rewarded proportionally
+    win_rate_adj = max(0, (win_rate - 50) / 50)
+    
+    # Calculate composite score
+    composite_score = mar * win_rate_adj
+    
+    return composite_score
+
 def calculate_dynamic_slippage(entry_price):
     """Calculate slippage based on capital using logarithmic scaling"""
     min_slippage = 0.0001  # 0.01%

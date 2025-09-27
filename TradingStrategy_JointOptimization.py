@@ -7,32 +7,49 @@ from datetime import datetime
 import optuna
 import json
 import math
-from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
 
-import scipy.stats
-
 
 symbol = "XRP_USD"
 
-# Default parameters (used when skip_optimization=True)
-DEFAULT_MIN_RISK = 0.10156706168296842
-DEFAULT_MAX_RISK = 0.560968740215892
-DEFAULT_SCALING = 1.997729935382857
-DEFAULT_RR = 1.5028679530064106
-DEFAULT_MIN_PREDICTED_MOVE = 0.008826652470759522
-DEFAULT_MIN_HOLDING_PERIOD = 6
-DEFAULT_MAX_HOLDING_PERIOD = 83
-DEFAULT_PARTIAL_TAKE_PROFIT = 0.7309628950065246
-DEFAULT_MAX_CONCURRENT_TRADES = 10
-DEFAULT_WINDOW_SIZE = 27936
-DEFAULT_RETREIN_INTERVAL = 18606
-DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 3.547732908433746
-DEFAULT_ATR_PREDICTED_WEIGHT = 0.4310703192463601 # Weight for ATR vs predicted move (0.6 = 60% ATR, 40% predicted)
-DEFAULT_AGGRESSIVENESS = 2.3603634486172083
-DEFAULT_FEATURE_COUNT_K = 32
+# Create T and H dictionaries for default parameters
+T_default = {
+    'min_risk_percentage': 0.10156706168296842,
+    'max_risk_percentage': 0.560968740215892,
+    'risk_scaling_factor': 1.997729935382857,
+    'risk_reward_ratio': 1.5028679530064106,
+    'min_predicted_move': 0.008826652470759522,
+    'partial_take_profit': 0.7309628950065246,
+    'min_holding_period': 6,
+    'max_holding_period': 83,
+    'max_concurrent_trades': 10,
+    'stop_loss_atr_multiplier': 3.547732908433746,
+    'atr_predicted_weight': 0.4310703192463601,
+    'window_size': 27936,
+    'retrain_interval': 18606,
+    'aggressiveness': 2.3603634486172083,
+    'feature_count_k': 32
+}
+
+H_default = {
+    "learning_rate": 0.03005642076836405,
+    "n_estimators": 968,
+    "max_depth": 6,
+    "max_leaves": 127,
+    "min_child_weight": 2.1107014853533137,
+    "gamma": 0.005291390227408434,
+    "subsample": 0.7153869354301697,
+    "colsample_bytree": 0.875134069516763,
+    "colsample_bylevel": 0.7188483265723933,
+    "reg_lambda": 0.5552472488751153,
+    "reg_alpha": 0.020920311615052256,
+    "max_bin": 312,
+    'random_state': 42,
+    'tree_method': 'hist',
+}
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -42,7 +59,7 @@ TAKER_FEE = 0.012  # 1.2% fee when selling (deducted from sale value)
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = True  # Set to True to use default parameters
+SKIP_OPTIMIZATION = False  # Set to True to use default parameters
 USE_FAPT = False
 OPTIMIZATION_TRIALS = 4000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
@@ -389,6 +406,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
                     
                     # Use the cash ledger to get accurate available cash
                     available_cash = cash_ledger.available_cash
+                    #print(f"available_cash: {available_cash}")
                     
                     # Only proceed if we have enough cash for this trade
                     if available_cash <= 0:
@@ -418,23 +436,40 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
                     f_tp = MAKER_FEE
                     f_sl = TAKER_FEE
 
+                    # Calculate minimum stop loss distance to cover fees
+                    # T_floor = P_in * (f_e + f_sl) ensures we don't lose money on fees
+                    T_floor = P_in * (f_e + f_sl)
+                    
+                    if stop_loss_distance < T_floor:
+                        continue
+                    
+                    # Calculate stop loss price (must be below entry for long trades)
                     P_sl = (P_in * (1 + f_e) - stop_loss_distance) / (1 - f_sl)
-
+                    
+                    # Calculate risk-reward distance
                     T_rr = stop_loss_distance * T['risk_reward_ratio']
-
+                    
+                    # Calculate take profit price (must be above entry for long trades)
                     P_tp = (P_in * (1 + f_e) + T_rr) / (1 - f_tp)
 
-                    size = risk_amount / P_in
-                    size = min(size, available_cash / P_in)
-                    size = np.floor(size)
+                    P_be_tp = P_in * (1 + f_e) / (1 - f_tp)
                     
-                    if size <= 0:
-                        continue
+                    # Validate that stop loss is below entry and take profit is above stop loss
+                    # if P_sl >= P_in or P_tp <= P_sl:
+                    #     print(f"WARNING: Invalid price levels - Entry: {P_in:.4f}, SL: {P_sl:.4f}, TP: {P_tp:.4f}")
+                    #     print(f"  stop_loss_distance: {stop_loss_distance:.6f}, T_floor: {T_floor:.6f}")
+                    #     continue  # Skip this trade
+
+                    size = min(risk_amount / entry_price, available_cash / entry_price)
+                    
+                    if size <= 0: continue
                     
                     # Calculate trade value with Taker fee (1.2% added to trade value)
                     base_trade_value = entry_price * size
                     taker_fee_amount = base_trade_value * TAKER_FEE
                     trade_value = base_trade_value + taker_fee_amount
+
+                    # print(f"Entry price: {P_in}, Stop loss: {P_sl}, Take profit: {P_tp}, Size: {size}, Trade value: {trade_value}, Bracket size: {T_rr}")
                     
                     # Final check: ensure we don't exceed available cash
                     if trade_value > available_cash:
@@ -771,7 +806,7 @@ def objective(trial):
     #     print(f"  Sufficient data: {'YES' if len(df_trial) >= T['window_size'] else 'NO'}")
     
     # Run strategy with current parameters and trial-specific data
-    metrics = run_strategy(df_trial, T, H, feature_cols, target_cols)
+    metrics = run_strategy(df_trial, T_default, H_default, feature_cols, target_cols)
     
     # If no trades were made, return a very low score
     if metrics['trade_count'] == 0:
@@ -794,15 +829,7 @@ def objective(trial):
     trial.set_user_attr('equity_curve', equity_curve_dict)
     
     # Calculate composite score that balances multiple objectives
-    normalized_sharpe = metrics['sharpe_ratio']  # Assuming max Sharpe around 2.0
-    normalized_return = metrics['total_return'] / 100.0  # Convert percentage to decimal
-    normalized_drawdown = abs(metrics['max_drawdown']) / 100.0  # Convert percentage to decimal
-    mar = metrics['mar']
-    win_rate = metrics['win_rate']
-    win_rate_adj = max(0, (win_rate - 50)/50)
-    
-    
-    composite_score = mar*win_rate_adj
+    composite_score = calculate_composite_score(metrics['mar'], metrics['win_rate'])
     
     # Save top parameters after each trial
     save_top_parameters(study, symbol)
@@ -821,9 +848,9 @@ if __name__ == "__main__":
 
     # For default mode, use DEFAULT_WINDOW_SIZE for buffering
     if SKIP_OPTIMIZATION:
-        buffered_start_date = pd.to_datetime(start_date) - pd.Timedelta(days=DEFAULT_WINDOW_SIZE*15/60/24)
+        buffered_start_date = pd.to_datetime(start_date) - pd.Timedelta(days=T_default['window_size']*15/60/24)
         df = df[(df['Date'] >= buffered_start_date) & (df['Date'] <= end_date)]
-        print(f"Default mode: Data filtered with DEFAULT_WINDOW_SIZE={DEFAULT_WINDOW_SIZE}")
+        print(f"Default mode: Data filtered with DEFAULT_WINDOW_SIZE={T_default['window_size']}")
         print(f"Buffered start date: {buffered_start_date}")
         print(f"Final data length: {len(df)} bars")
         print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
@@ -841,85 +868,47 @@ if __name__ == "__main__":
     # Run optimization or use default parameters
     if SKIP_OPTIMIZATION:
         print("\nUsing default parameters (optimization skipped)")
-        print(f"Min Risk: {DEFAULT_MIN_RISK:.3f}")
-        print(f"Max Risk: {DEFAULT_MAX_RISK:.3f}")
-        print(f"Risk Scaling: {DEFAULT_SCALING}")
-        print(f"Risk:Reward: {DEFAULT_RR}")
-        print(f"Min Predicted Move: {DEFAULT_MIN_PREDICTED_MOVE:.3f}")
-        print(f"Partial Take Profit: {DEFAULT_PARTIAL_TAKE_PROFIT:.3f}")
-        print(f"Min Holding Period: {DEFAULT_MIN_HOLDING_PERIOD}")
-        print(f"Max Holding Period: {DEFAULT_MAX_HOLDING_PERIOD}")
-        print(f"Max Concurrent Trades: {DEFAULT_MAX_CONCURRENT_TRADES}")
-        print(f"Window Size: {DEFAULT_WINDOW_SIZE}")
-        print(f"Retrain Interval: {DEFAULT_RETREIN_INTERVAL}")
-        print(f"Stop Loss ATR Multiplier: {DEFAULT_STOP_LOSS_ATR_MULTIPLIER}")
-        print(f"ATR vs Predicted Weight: {DEFAULT_ATR_PREDICTED_WEIGHT}")
+        print(f"Min Risk: {T_default['min_risk_percentage']:.3f}")
+        print(f"Max Risk: {T_default['max_risk_percentage']:.3f}")
+        print(f"Risk Scaling: {T_default['risk_scaling_factor']}")
+        print(f"Risk:Reward: {T_default['risk_reward_ratio']}")
+        print(f"Min Predicted Move: {T_default['min_predicted_move']:.3f}")
+        print(f"Partial Take Profit: {T_default['partial_take_profit']:.3f}")
+        print(f"Min Holding Period: {T_default['min_holding_period']}")
+        print(f"Max Holding Period: {T_default['max_holding_period']}")
+        print(f"Max Concurrent Trades: {T_default['max_concurrent_trades']}")
+        print(f"Window Size: {T_default['window_size']}")
+        print(f"Retrain Interval: {T_default['retrain_interval']}")
+        print(f"Stop Loss ATR Multiplier: {T_default['stop_loss_atr_multiplier']}")
+        print(f"ATR vs Predicted Weight: {T_default['atr_predicted_weight']}")
         print(f"Maker Fee (Buy): {MAKER_FEE*100:.1f}%")
         print(f"Taker Fee (Sell): {TAKER_FEE*100:.1f}%")
         print(f"Total Round-trip Cost: {(MAKER_FEE + TAKER_FEE)*100:.1f}%")
         print("Stop loss and take profit levels are adjusted to compensate for fees")
-        # Create T and H dictionaries for default parameters
-        T_default = {
-            'min_risk_percentage': DEFAULT_MIN_RISK,
-            'max_risk_percentage': DEFAULT_MAX_RISK,
-            'risk_scaling_factor': DEFAULT_SCALING,
-            'risk_reward_ratio': DEFAULT_RR,
-            'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
-            'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
-            'min_holding_period': DEFAULT_MIN_HOLDING_PERIOD,
-            'max_holding_period': DEFAULT_MAX_HOLDING_PERIOD,
-            'max_concurrent_trades': DEFAULT_MAX_CONCURRENT_TRADES,
-            'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
-            'atr_predicted_weight': DEFAULT_ATR_PREDICTED_WEIGHT,
-            'window_size': DEFAULT_WINDOW_SIZE,
-            'retrain_interval': DEFAULT_RETREIN_INTERVAL,
-            'aggressiveness': DEFAULT_AGGRESSIVENESS,
-            'feature_count_k': DEFAULT_FEATURE_COUNT_K
-        }
-        
-        H_default = {
-            "learning_rate": 0.03005642076836405,
-            "n_estimators": 968,
-            "max_depth": 3,
-            "max_leaves": 127,
-            "min_child_weight": 2.1107014853533137,
-            "gamma": 0.005291390227408434,
-            "subsample": 0.7153869354301697,
-            "colsample_bytree": 0.875134069516763,
-            "colsample_bylevel": 0.7188483265723933,
-            "reg_lambda": 0.5552472488751153,
-            "reg_alpha": 0.020920311615052256,
-            "max_bin": 312,
-            'random_state': 42,
-            'tree_method': 'hist',
-        }
+
         
         best_metrics = run_strategy(df, T_default, H_default, feature_cols, target_cols)
         
-        # Calculate composite score
-        composite_score = (
-            best_metrics['total_return'] / 
-            (abs(best_metrics['max_drawdown']) + 1e-8) * 
-            np.sqrt(best_metrics['win_rate'] / 100)
-        )
+        # Calculate composite score for default parameters
+        composite_score = calculate_composite_score(best_metrics['mar'], best_metrics['win_rate'])
         
         results = [{
             # Trading parameters
-            'min_risk_percentage': DEFAULT_MIN_RISK,
-            'max_risk_percentage': DEFAULT_MAX_RISK,
-            'risk_scaling_factor': DEFAULT_SCALING,
-            'risk_reward_ratio': DEFAULT_RR,
-            'min_predicted_move': DEFAULT_MIN_PREDICTED_MOVE,
-            'stop_loss_atr_multiplier': DEFAULT_STOP_LOSS_ATR_MULTIPLIER,
-            'atr_predicted_weight': DEFAULT_ATR_PREDICTED_WEIGHT,
-            'window_size': DEFAULT_WINDOW_SIZE,
-            'retrain_interval': DEFAULT_RETREIN_INTERVAL,
-            'partial_take_profit': DEFAULT_PARTIAL_TAKE_PROFIT,
-            'min_holding_period': DEFAULT_MIN_HOLDING_PERIOD,
-            'max_holding_period': DEFAULT_MAX_HOLDING_PERIOD,
-            'max_concurrent_trades': DEFAULT_MAX_CONCURRENT_TRADES,
-            'aggressiveness': DEFAULT_AGGRESSIVENESS,
-            'feature_count_k': DEFAULT_FEATURE_COUNT_K,
+            'min_risk_percentage': T_default['min_risk_percentage'],
+            'max_risk_percentage': T_default['max_risk_percentage'],
+            'risk_scaling_factor': T_default['risk_scaling_factor'],
+            'risk_reward_ratio': T_default['risk_reward_ratio'],
+            'min_predicted_move': T_default['min_predicted_move'],
+            'stop_loss_atr_multiplier': T_default['stop_loss_atr_multiplier'],
+            'atr_predicted_weight': T_default['atr_predicted_weight'],
+            'window_size': T_default['window_size'],
+            'retrain_interval': T_default['retrain_interval'],
+            'partial_take_profit': T_default['partial_take_profit'],
+            'min_holding_period': T_default['min_holding_period'],
+            'max_holding_period': T_default['max_holding_period'],
+            'max_concurrent_trades': T_default['max_concurrent_trades'],
+            'aggressiveness': T_default['aggressiveness'],
+            'feature_count_k': T_default['feature_count_k'],
             # Model parameters
             'learning_rate': H_default['learning_rate'],
             'n_estimators': H_default['n_estimators'],
@@ -1053,12 +1042,6 @@ if __name__ == "__main__":
         
         best_metrics = run_strategy(df_best, T_best, H_best, feature_cols, target_cols)
         
-        # Calculate final composite score
-        final_composite_score = (
-            (0.4 * best_metrics['sharpe_ratio'] / 2.0) +
-            (0.4 * best_metrics['total_return'] / 100.0) -
-            (0.2 * abs(best_metrics['max_drawdown']) / 100.0)
-        )
         
         results = [{
             # Trading parameters
@@ -1101,7 +1084,6 @@ if __name__ == "__main__":
             'cagr': best_metrics['cagr'],
             'mar': best_metrics['mar'],
             'trade_count': best_metrics['trade_count'],
-            'composite_score': final_composite_score,
             'equity_curve': best_metrics['equity_curve'],
             'trade_history': best_metrics['trade_history']
         }]
