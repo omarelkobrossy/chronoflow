@@ -149,6 +149,37 @@ def _expanding_zscore_no_lookahead(df_num: pd.DataFrame) -> np.ndarray:
     Z[0, :] = 0.0
     return Z.astype(np.float32, copy=False)
 
+def make_ref_bins(x_ref, bins=20):
+    # quantile edges from the *training* slice; strictly increasing
+    q = np.quantile(x_ref[~np.isnan(x_ref)], np.linspace(0, 1, bins+1))
+    q[0], q[-1] = -np.inf, np.inf
+    # fix potential duplicates
+    for i in range(1, len(q)):
+        if q[i] <= q[i-1]:
+            q[i] = q[i-1] + 1e-12
+    return q
+
+def psi_from_bins(x_ref, x_cur, edges, eps=1e-9):
+    # histogram using TRAIN edges for both ref and current
+    r = np.histogram(x_ref[~np.isnan(x_ref)], edges)[0].astype(np.float64)
+    c = np.histogram(x_cur[~np.isnan(x_cur)], edges)[0].astype(np.float64)
+    r = r / max(r.sum(), 1.0)
+    c = c / max(c.sum(), 1.0)
+    r = np.clip(r, eps, None); c = np.clip(c, eps, None)
+    return float(np.sum((r - c) * np.log(r / c)))
+
+def hist_pdf(arr, edges, eps=1e-9):
+    h = np.histogram(arr[~np.isnan(arr)], edges)[0].astype(np.float64)
+    s = h.sum()
+    if s <= 0:
+        return np.full_like(h, 1.0 / len(h), dtype=np.float64)
+    return np.maximum(h / s, eps)
+
+def psi_with_ref_pdf(cur_arr, edges, ref_pdf, eps=1e-9):
+    cur_pdf = hist_pdf(cur_arr, edges, eps)
+    # PSI = sum( (ref - cur) * log(ref/cur) )
+    return float(np.sum((ref_pdf - cur_pdf) * np.log(ref_pdf / cur_pdf)))
+
 def calculate_feature_importance(
     df: pd.DataFrame,
     feature_cols,

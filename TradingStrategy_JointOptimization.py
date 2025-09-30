@@ -7,7 +7,7 @@ from datetime import datetime
 import optuna
 import json
 import math
-from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score, sanitize_features, standardize_expanding, standardize_expanding_train
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score, sanitize_features, standardize_expanding, standardize_expanding_train, make_ref_bins, psi_from_bins
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
@@ -31,7 +31,6 @@ T_default = {
     "aggressiveness": 1.933354082966644,
     "feature_count_k": 35,
     "window_size": 34257,
-    "retrain_interval": 30333
 }
 
 H_default = {
@@ -51,6 +50,7 @@ H_default = {
     'tree_method': 'hist',
     'device': 'cuda',
 }
+
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
@@ -83,11 +83,22 @@ if USE_FAPT:
 
 
 def run_strategy(df_window, T, H, feature_cols, target_cols):
+
+    D = {
+        "psi_bins": 20,                # quantile bins built from the TRAIN window
+        "psi_feat_count": T['feature_count_k'],          # how many top features to monitor (from FI order)
+        "psi_check_step": 500,                  # compute PSI every N bars
+        "psi_window": T['window_size'],         # size of the "current" slice to compare vs train ref
+        "psi_threshold_hi": 0.25,               # strong drift → full reset + recompute FI
+        "psi_threshold_lo": 0.12,               # mild drift → warm-add trees (optional)
+        "psi_cooldown": 50,                     # min bars between retrains
+        "min_bars_between_full_reset": 300,     # extra guard
+    }
  
     # Initialize predicted change column
     df_window['Predicted_Change'] = np.nan
     
-    # Simulate trading with model retraining every retrain_interval bars
+    # Simulate trading with model retraining every PSI threshold step bars
     capital = INITIAL_CAPITAL
     open_trades = []
     trade_history = []
@@ -193,18 +204,59 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
     model = xgb.XGBRegressor(**H)
     model.fit(X_initial, y_initial)
     
-    # Process data in chunks
-    print("\nProcessing data in chunks...")
-    total_data_processed = 0
+    # Initialize PSI reference bins from initial training window
+    print("\nCalculating PSI reference bins from initial training window...")
+    psi_ref_data = initial_window[clean_features]
+    psi_ref_bins = {}
+    for feature in clean_features:
+        psi_ref_bins[feature] = make_ref_bins(psi_ref_data[feature].values, bins=D['psi_bins'])
     
-    for start in range(T['window_size'], n, T['retrain_interval']):
-        end = min(start + T['retrain_interval'], n)
-        total_data_processed += T['retrain_interval']
+    # Process data with PSI-based drift detection
+    print("\nProcessing data with PSI-based drift detection...")
+    start = T['window_size']
+    
+    while start < n:
+        # Determine end point based on PSI drift detection
+        end = start + D['psi_check_step']  # Start with minimum step
+        drift_detected = False
         
-        # Recalculate feature importance every window_size worth of data
-        if total_data_processed >= T['retrain_interval']:
+        # Check for drift every psi_check_step
+        for check_idx in range(start + D['psi_check_step'], n, D['psi_check_step']):
+            # Get current window for PSI calculation
+            current_window_start = max(0, check_idx - D['psi_window'])
+            current_window_data = df_window.iloc[current_window_start:check_idx][clean_features]
+            
+            # Calculate PSI for each feature
+            max_psi = 0.0
+            for feature in clean_features:
+                if feature in psi_ref_bins and feature in current_window_data.columns:
+                    psi_value = psi_from_bins(
+                        psi_ref_data[feature].values,
+                        current_window_data[feature].values,
+                        psi_ref_bins[feature]
+                    )
+                    max_psi = max(max_psi, psi_value)
+            
+            print(f"PSI check at index {check_idx}: max_psi = {max_psi:.4f}")
+            
+            # Check if drift exceeds threshold
+            if max_psi > D['psi_threshold_hi']:
+                print(f"Strong drift detected (PSI={max_psi:.4f} > {D['psi_threshold_hi']}) at index {check_idx}")
+                end = check_idx
+                drift_detected = True
+                break
+            elif max_psi > D['psi_threshold_lo']:
+                print(f"Mild drift detected (PSI={max_psi:.4f} > {D['psi_threshold_lo']}) at index {check_idx}")
+                # Continue monitoring but note mild drift
+        
+        # If no drift detected, use normal PSI check step
+        if not drift_detected:
+            end = min(start + D['psi_check_step'], n)
+        
+        # Recalculate feature importance if drift was detected or if we've processed enough data
+        if drift_detected:
             print(f"\nRecalculating feature importance at index {start}...")
-            feature_selection_data = df_window.iloc[start-T['window_size']:start].copy()
+            feature_selection_data = df_window.iloc[start-D['psi_window']:start].copy()
             current_features = calculate_feature_importance(
                 feature_selection_data,
                 feature_cols,
@@ -215,7 +267,13 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
                 visualize_importance=False,
                 K=T['feature_count_k']
             )
-            total_data_processed = 0
+            
+            # Update PSI reference bins with new training data
+            psi_ref_data = feature_selection_data[clean_features]
+            psi_ref_bins = {}
+            for feature in clean_features:
+                psi_ref_bins[feature] = make_ref_bins(psi_ref_data[feature].values, bins=D['psi_bins'])
+            print("Updated PSI reference bins")
         
         current_holdout = df_window.iloc[start:end].copy()
         current_train   = df_window.iloc[:start].copy()
@@ -301,7 +359,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
             min_holding_period = fapt_params['parameters']['min_holding_period']
             max_holding_period = fapt_params['parameters']['max_holding_period']
             max_concurrent_trades = fapt_params['parameters']['max_concurrent_trades']
-
+        
         # --- prebind arrays and constants once ---
         High   = df_window['High'  ].to_numpy(np.float64, copy=False)
         Low    = df_window['Low'   ].to_numpy(np.float64, copy=False)
@@ -350,7 +408,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
             maker_factor = 1.0 - f_maker
             return p_entry + ptp_frac * (p_tp - p_entry) / maker_factor
 
-        # --- main loop ---
+        # --- main trading loop for this chunk ---
         for idx in range(start, end):
             high = High[idx]
             low  = Low[idx]
@@ -523,6 +581,9 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
 
             total_portfolio_value = cash_ledger.get_portfolio_value(mv)
             equity_curve.iloc[idx - trading_start_idx] = np.float64(total_portfolio_value)
+        
+        # Update start for next iteration
+        start = end
 
 
     # Close any remaining open trades
@@ -621,9 +682,8 @@ def save_top_parameters(study, symbol):
     
     # Add each trial's parameters and metrics
     for i, (trial_num, score, params, attrs) in enumerate(top_10):
-        # Calculate actual window_size and retrain_interval
+        # Calculate actual window_size
         window_size = clamp(int(len(df) * params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-        retrain_interval = max(int(window_size * params['retrain_fraction']), 10)
         
         # Separate trading and model parameters
         trading_params = {
@@ -641,9 +701,7 @@ def save_top_parameters(study, symbol):
             'aggressiveness': params['aggressiveness'],
             'feature_count_k': params['feature_count_k'],
             'window_fraction': params['window_fraction'],
-            'retrain_fraction': params['retrain_fraction'],
             'calculated_window_size': window_size,
-            'calculated_retrain_interval': retrain_interval
         }
         
         model_params = {
@@ -741,7 +799,6 @@ def objective(trial):
         'risk_reward_ratio': trial.suggest_float('risk_reward_ratio', 1.5, 3.0),
         'min_predicted_move': trial.suggest_float('min_predicted_move', 0.005, 0.01),
         'window_fraction': trial.suggest_float('window_fraction', 0.01, 0.5),  # 1% to 50% of the data
-        'retrain_fraction': trial.suggest_float('retrain_fraction', 0.05, 1),  # 5% to 100% of the window size
         'partial_take_profit': trial.suggest_float('partial_take_profit', 0.7, 0.95),
         'min_holding_period': trial.suggest_int('min_holding_period', 5, 50),
         'max_holding_period': trial.suggest_int('max_holding_period', 60, 100),
@@ -754,9 +811,7 @@ def objective(trial):
     
     # Calculate derived parameters
     window_size = clamp(int(len(df) * T['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-    retrain_interval = max(int(window_size * T['retrain_fraction']), 10)
     T['window_size'] = window_size
-    T['retrain_interval'] = retrain_interval
 
     # Define model hyperparameters (H)
     H = {
@@ -787,7 +842,6 @@ def objective(trial):
         print(f"    reward_ratio: {T['risk_reward_ratio']:.6f}")
         print(f"    min_predicted_move: {T['min_predicted_move']:.6f}")
         print(f"    window_size: {T['window_size']}")
-        print(f"    retrain_interval: {T['retrain_interval']}")
         print(f"    stop_loss_atr_multiplier: {T['stop_loss_atr_multiplier']:.6f}")
         print(f"    atr_predicted_weight: {T['atr_predicted_weight']:.6f}")
         print(f"    aggressiveness: {T['aggressiveness']:.6f}")
@@ -883,7 +937,6 @@ if __name__ == "__main__":
         print(f"Max Holding Period: {T_default['max_holding_period']}")
         print(f"Max Concurrent Trades: {T_default['max_concurrent_trades']}")
         print(f"Window Size: {T_default['window_size']}")
-        print(f"Retrain Interval: {T_default['retrain_interval']}")
         print(f"Stop Loss ATR Multiplier: {T_default['stop_loss_atr_multiplier']}")
         print(f"ATR vs Predicted Weight: {T_default['atr_predicted_weight']}")
         print(f"Maker Fee (Buy): {MAKER_FEE*100:.1f}%")
@@ -907,7 +960,6 @@ if __name__ == "__main__":
             'stop_loss_atr_multiplier': T_default['stop_loss_atr_multiplier'],
             'atr_predicted_weight': T_default['atr_predicted_weight'],
             'window_size': T_default['window_size'],
-            'retrain_interval': T_default['retrain_interval'],
             'partial_take_profit': T_default['partial_take_profit'],
             'min_holding_period': T_default['min_holding_period'],
             'max_holding_period': T_default['max_holding_period'],
@@ -996,9 +1048,8 @@ if __name__ == "__main__":
         
         # Get best parameters
         best_params = study.best_params
-        # Calculate actual window_size and retrain_interval from fractions
+        # Calculate actual window_size and from fractions
         window_size = clamp(int(len(df) * best_params['window_fraction']), MIN_WINDOW, MAX_WINDOW)
-        retrain_interval = max(int(window_size * best_params['retrain_fraction']), 10)
         
         # Create T and H dictionaries from best parameters
         T_best = {
@@ -1014,7 +1065,6 @@ if __name__ == "__main__":
             'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
             'atr_predicted_weight': best_params['atr_predicted_weight'],
             'window_size': window_size,
-            'retrain_interval': retrain_interval
         }
         
         H_best = {
@@ -1056,13 +1106,11 @@ if __name__ == "__main__":
             'risk_reward_ratio': best_params['risk_reward_ratio'],
             'min_predicted_move': best_params['min_predicted_move'],
             'window_fraction': best_params['window_fraction'],
-            'retrain_fraction': best_params['retrain_fraction'],
             'stop_loss_atr_multiplier': best_params['stop_loss_atr_multiplier'],
             'atr_predicted_weight': best_params['atr_predicted_weight'],
             'aggressiveness': best_params['aggressiveness'],
             'feature_count_k': best_params['feature_count_k'],
             'window_size': window_size,
-            'retrain_interval': retrain_interval,
             'partial_take_profit': best_params['partial_take_profit'],
             'min_holding_period': best_params['min_holding_period'],
             'max_holding_period': best_params['max_holding_period'],
@@ -1110,7 +1158,6 @@ if __name__ == "__main__":
     print(f"Aggressiveness: {best_params['aggressiveness']:.2f}")
     print(f"Feature Count K: {best_params['feature_count_k']}")
     print(f"Window Size: {best_params['window_size']}")
-    print(f"Retrain Interval: {best_params['retrain_interval']}")
     print(f"Partial Take Profit: {best_params['partial_take_profit']:.3f}")
     print(f"Min Holding Period: {best_params['min_holding_period']}")
     print(f"Max Holding Period: {best_params['max_holding_period']}")
