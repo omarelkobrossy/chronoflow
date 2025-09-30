@@ -158,7 +158,7 @@ def calculate_feature_importance(
     save_importance: bool = False,
     visualize_importance: bool = False,
     K: int = 48,
-    max_bin: int = 512
+    max_bin: int = 256
 ):
     """
     GPU-accelerated walk-forward feature importance (XGBoost total_gain).
@@ -171,10 +171,13 @@ def calculate_feature_importance(
     # Ensure GPU params
     params = dict(model_params)  # shallow copy
     params.update({
-        'device': 'cuda',
-        'max_bin': max_bin,
-        # make sure importance type uses gain internally
-        "eval_metric": "rmse"
+        "n_estimators": 50,
+        "max_depth": 4,
+        "subsample": 0.5,
+        "colsample_bytree": 0.5,
+        "max_bin": max_bin,
+        "device": "cuda",
+        "tree_method": "hist"
     })
 
     n = len(df)

@@ -188,7 +188,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
 
     # 5) Build & fit model (ensure GPU params are unified everywhere)
     H['device'] = 'cuda'
-    H['max_bin'] = 512   # pick one value and keep it the same across all trainings
+    H['max_bin'] = 256   # pick one value and keep it the same across all trainings
 
     model = xgb.XGBRegressor(**H)
     model.fit(X_initial, y_initial)
