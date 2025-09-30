@@ -2,50 +2,21 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import matplotlib.pyplot as plt
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.decomposition import PCA
-import seaborn as sns
-from datetime import datetime, timedelta
-import joblib
 import os
 from tqdm import tqdm
-import shap # Import SHAP
+import requests
 import json
 from scipy import stats
+from math import exp
+from sklearn.preprocessing import LabelEncoder
+import numba as nb
 
-# Define model parameters for feature selection
-# model_params = {
-#     'n_estimators': 50,
-#     'max_depth': 4,
-#     'learning_rate': 0.1,
-#     'min_child_weight': 10,
-#     'subsample': 0.7,
-#     'colsample_bytree': 0.7,
-#     'reg_alpha': 0.5,
-#     'reg_lambda': 1.0,
-#     'random_state': 42,
-#     'tree_method': 'hist',
-#     'device': 'cpu'  # Changed from 'cuda' to 'cpu' for consistency
-# }
 
 # Load the data
 symbol = "TSLA"
 input_dataset = f"DB/{symbol}_15min_indicators.csv"
 df = pd.read_csv(input_dataset)
-# df = df.iloc[:int(len(df) * 0.5)]
-
-# Create train and holdout sets (75% train, 25% holdout)
-# train_size = int(len(df) * 0.75)
-# train_df = df.iloc[:train_size].copy()
-# holdout_df = df.iloc[train_size:].copy()
-
-
-# # Store original price for backtesting
-# train_df['Close_Original'] = train_df['Close'].copy()
-# holdout_df['Close_Original'] = holdout_df['Close'].copy()
-
 
 def preprocess_data(df):
     print("\nStarting data preprocessing...")
@@ -153,101 +124,179 @@ def preprocess_data(df):
 
     return df, feature_cols, target_cols
 
+def _expanding_zscore_no_lookahead(df_num: pd.DataFrame) -> np.ndarray:
+    """
+    Vectorized expanding z-score with 1-step shift (no lookahead).
+    Returns a float32 numpy array of shape (n_samples, n_features).
+    """
+    X = df_num.to_numpy(dtype=np.float64, copy=False)  # [N,F]
+    # cumulative sums
+    csum   = np.cumsum(np.nan_to_num(X, nan=0.0), axis=0)
+    csum2  = np.cumsum(np.nan_to_num(X**2, nan=0.0), axis=0)
+    n      = np.arange(1, X.shape[0] + 1, dtype=np.float64)[:, None]
 
-def calculate_feature_importance(df, feature_cols, target_cols, model_params=None, iterations=1, save_importance=False, visualize_importance=False, K=48):
-    # Use passed model_params or fall back to global default
+    # expanding mean/std at t (including t). We need stats at t-1, so shift by 1.
+    mean_t = csum / n
+    var_t  = np.maximum(csum2 / n - mean_t**2, 0.0)
+    std_t  = np.sqrt(var_t)
+
+    # shift stats by 1 to avoid lookahead
+    mean_tm1 = np.vstack([np.full((1, X.shape[1]), np.nan), mean_t[:-1]])
+    std_tm1  = np.vstack([np.full((1, X.shape[1]), np.nan), std_t[:-1]])
+
+    Z = (X - mean_tm1) / (std_tm1 + 1e-8)
+    # For the first row (no history), z-scores are undefined → set to 0
+    Z[0, :] = 0.0
+    return Z.astype(np.float32, copy=False)
+
+def calculate_feature_importance(
+    df: pd.DataFrame,
+    feature_cols,
+    target_cols,
+    model_params=None,
+    iterations: int = 1,
+    save_importance: bool = False,
+    visualize_importance: bool = False,
+    K: int = 48,
+    max_bin: int = 512
+):
+    """
+    GPU-accelerated walk-forward feature importance (XGBoost total_gain).
+    Picks top-K by average gain over 'iterations' expanding batches.
+    """
+
     if model_params is None:
-        model_params = globals()['model_params']
-    
-    feature_importance_scores = {}
-    batch_size = len(df) // iterations
-    
-    # Calculate feature importance using expanding window
-    print("\nImplementing walk-forward feature selection...")
-    
-    # Process in batches to better utilize GPU
-    for batch_start in tqdm(range(0, len(df), batch_size), desc="Feature Selection Progress"):
-        batch_end = min(batch_start + batch_size, len(df))
-        
-        # Get training data for the entire batch
-        train_data = df.iloc[:batch_end].copy()  # Only use data up to current batch
-        
-        # Scale features using rolling statistics for the entire batch
-        X_train = train_data[feature_cols].copy()
-        for col in feature_cols:
-            # Use expanding mean/std with shift to prevent look-ahead bias
-            mean = X_train[col].expanding(min_periods=1).mean().shift(1)
-            std = X_train[col].expanding(min_periods=1).std().shift(1)
-            
-            # Standardize
-            X_train[col] = (X_train[col] - mean) / (std + 1e-8)
-        
-        # Convert to numpy arrays
-        X_train_scaled = np.array(X_train.values, dtype=np.float32)
-        y_train = np.array(train_data[target_cols].values.ravel(), dtype=np.float32)
-        
-        # Train model for feature importance
-        model = xgb.XGBRegressor(**model_params)
-        model.fit(X_train_scaled, y_train)
-        
-        # 1) After fitting the model
-        booster = model.get_booster()
-        gain_scores = booster.get_score(importance_type="total_gain")
-        
-        # Map XGBoost feature indices (f0, f1, f2, etc.) to actual feature names
-        feature_mapping = {f"f{i}": name for i, name in enumerate(feature_cols)}
-        
-        # Convert gain_scores to use actual feature names
-        actual_gain_scores = {}
-        for f_idx, score in gain_scores.items():
-            actual_feature_name = feature_mapping.get(f_idx, f_idx)
-            actual_gain_scores[actual_feature_name] = score
-        
-        # Accumulate scores for averaging across iterations
-        for feature in feature_cols:
-            importance = actual_gain_scores.get(feature, 0.0)
-            if feature not in feature_importance_scores:
-                feature_importance_scores[feature] = []
-            feature_importance_scores[feature].append(importance)
+        raise ValueError("Pass your tuned XGBoost params (we'll add gpu settings for you).")
 
-    # Calculate average importance scores
-    avg_importance = {feature: np.mean(scores) for feature, scores in feature_importance_scores.items()}
-    
-    # build importance df from gain_scores
-    feature_importance = pd.DataFrame([
-        {"Feature": f, "Importance": avg_importance.get(f, 0.0)}
-        for f in feature_cols
-    ]).sort_values("Importance", ascending=False)
+    # Ensure GPU params
+    params = dict(model_params)  # shallow copy
+    params.update({
+        'device': 'cuda',
+        'max_bin': max_bin,
+        # make sure importance type uses gain internally
+        "eval_metric": "rmse"
+    })
+
+    n = len(df)
+    iterations = max(1, int(iterations))
+    batch_size = max(1, n // iterations)
+
+    feat_names = list(feature_cols)
+    target_name = target_cols if isinstance(target_cols, str) else target_cols[0]
+
+    # Accumulate GAIN sums (not lists) to save memory
+    gain_sum = {f: 0.0 for f in feat_names}
+    gain_cnt = {f: 0    for f in feat_names}
+
+    print("\n[Feature Selection] Walk-forward batches on GPU...")
+    for batch_start in tqdm(range(0, n, batch_size), desc="FS Progress"):
+        batch_end = min(batch_start + batch_size, n)
+        train_data = df.iloc[:batch_end]
+
+        # Standardize with expanding stats (no lookahead) for this batch
+        X_train_df = train_data[feat_names]
+        Z_train = _expanding_zscore_no_lookahead(X_train_df)   # np.float32 [B,F]
+        y_train = train_data[target_name].to_numpy(np.float32, copy=False)
+
+        # Build GPU-quantized DMatrix with feature names
+        dtrain = xgb.QuantileDMatrix(Z_train, label=y_train, feature_names=feat_names, max_bin=max_bin)
+
+        # Train booster (native API; faster than sklearn wrapper)
+        num_boost_round = params.get("n_estimators", 500)
+        booster = xgb.train(
+            {k: v for k, v in params.items() if k != "n_estimators"},
+            dtrain,
+            num_boost_round=num_boost_round
+        )
+
+        # total_gain importance (dict: {feature_name: gain})
+        gain_scores = booster.get_score(importance_type="total_gain")
+
+        # accumulate
+        for f in feat_names:
+            g = float(gain_scores.get(f, 0.0))
+            gain_sum[f] += g
+            gain_cnt[f] += 1
+
+    # Average gain (if a feature never used in a batch, its gain stays 0 for that batch)
+    avg_importance = {
+        f: (gain_sum[f] / max(gain_cnt[f], 1)) for f in feat_names
+    }
+
+    feature_importance = (
+        pd.DataFrame({"Feature": feat_names, "Importance": [avg_importance[f] for f in feat_names]})
+        .sort_values("Importance", ascending=False)
+        .reset_index(drop=True)
+    )
 
     if save_importance:
-        # Save selected features and their importance scores to JSON
+        import os, json
         os.makedirs('Features', exist_ok=True)
-        features_file = f'Features/{symbol}.json'
-        features_to_save = {
-            feature: float(importance)  # Convert numpy.float64 to Python float for JSON serialization
-            for feature, importance in zip(feature_importance['Feature'], feature_importance['Importance'])
-        }
+        features_file = f'Features/{params.get("symbol","features")}.json'
         with open(features_file, 'w') as f:
-            json.dump(features_to_save, f, indent=4)
-            print(f"\nFeatures and importance scores saved to {features_file}")
-            print(f"Saved {len(features_to_save)} features")
-    
+            json.dump({row.Feature: float(row.Importance) for _, row in feature_importance.iterrows()}, f, indent=4)
+        print(f"Saved feature gains to {features_file}")
+
     if visualize_importance:
-        # Plot feature importance
+        import matplotlib.pyplot as plt
+        topn = min(20, len(feature_importance))
         plt.figure(figsize=(12, 6))
-        plt.barh(feature_importance['Feature'][:20], feature_importance['Importance'][:20])
-        plt.title('Top 20 Most Important Features (Expanding Window Analysis)')
-        plt.xlabel('Average Importance Score')
+        plt.barh(feature_importance['Feature'][:topn][::-1], feature_importance['Importance'][:topn][::-1])
+        plt.title('Top Feature Gains (avg over batches)')
+        plt.xlabel('Average total_gain')
         plt.tight_layout()
         plt.savefig("DB/charts/feature_importance.png")
-        print("Feature importance chart saved to DB/charts/feature_importance.png")
+        print("Chart saved to DB/charts/feature_importance.png")
 
-    # 2) Pick top-K instead of threshold
-    selected_features = feature_importance.head(K)['Feature'].tolist()
-    
-    print(f"\nSelected {len(selected_features)} features based on expanding window importance analysis")
-    
-    return selected_features
+    # Top-K pick
+    selected = feature_importance.head(K)['Feature'].tolist()
+    print(f"\nSelected {len(selected)} features (top-K by avg total_gain)")
+    return selected
+
+def sanitize_features(df_train, feature_names, eps=1e-12):
+    """Return a clean, ordered list of features that are present, numeric, non-constant in df_train."""
+    cols = []
+    for c in feature_names:
+        if c not in df_train.columns:
+            continue
+        s = df_train[c]
+        if not np.issubdtype(s.dtype, np.number):
+            # try coercion
+            s = pd.to_numeric(s, errors='coerce')
+            if s.isna().all():
+                continue
+        # non-constant? (std over training window prior to scaling)
+        if s.count() <= 1:
+            continue
+        if (s.max() - s.min()) < eps:
+            continue
+        cols.append(c)
+    # preserve original order
+    return cols
+
+def standardize_expanding(train_df, hold_df, cols):
+    """Expanding mean/std with shift(1). Returns float32 DataFrames with identical column order."""
+    Xtr = train_df[cols].astype(np.float64).copy()
+    Xho = hold_df[cols].astype(np.float64).copy()
+    for c in cols:
+        mean = Xtr[c].expanding(min_periods=1).mean().shift(1)
+        std  = Xtr[c].expanding(min_periods=1).std().shift(1)
+        Xtr[c] = (Xtr[c] - mean) / (std + 1e-8)
+        last_mean = mean.iloc[-1]
+        last_std  = std.iloc[-1] if not np.isnan(std.iloc[-1]) and std.iloc[-1] > 0 else 1.0
+        Xho[c] = (Xho[c] - last_mean) / (last_std + 1e-8)
+    return Xtr.astype(np.float32), Xho.astype(np.float32)
+
+def standardize_expanding_train(train_df, cols):
+    """Expanding mean/std with shift(1) on the training window only."""
+    Xtr = train_df[cols].astype(np.float64).copy()
+    for c in cols:
+        mean = Xtr[c].expanding(min_periods=1).mean().shift(1)
+        std  = Xtr[c].expanding(min_periods=1).std().shift(1)
+        Xtr[c] = (Xtr[c] - mean) / (std + 1e-8)
+    # first row had no history → NaNs → fill with 0
+    Xtr = Xtr.fillna(0.0).astype(np.float32)
+    return Xtr
 
 
 def clamp(value, min_value, max_value):
@@ -263,6 +312,15 @@ def calculate_max_drawdown(equity_curve):
     rolling_max = equity_curve.expanding().max()
     drawdowns = equity_curve / rolling_max - 1
     return drawdowns.min()
+
+def calculate_n_per_year(trade_count, start_date, end_date):
+    """Calculate number of trades per year"""
+    # Convert to pandas Timestamp if needed
+    if not isinstance(start_date, pd.Timestamp):
+        start_date = pd.to_datetime(start_date)
+    if not isinstance(end_date, pd.Timestamp):
+        end_date = pd.to_datetime(end_date)
+    return trade_count / ((end_date - start_date).total_seconds() / (365.25 * 24 * 3600))
 
 def calculate_cagr(initial_capital, final_capital, start_date, end_date):
     """
@@ -297,7 +355,7 @@ def calculate_cagr(initial_capital, final_capital, start_date, end_date):
     
     return cagr
 
-def calculate_mar(cagr, max_drawdown):
+def calculate_mar(cagr, max_drawdown, dd_min=0.01):
     """
     Calculate Managed Account Ratio (MAR)
     
@@ -313,25 +371,40 @@ def calculate_mar(cagr, max_drawdown):
     Returns:
         MAR as a decimal (e.g., 1.5 for 1.5x)
     """
-    # Handle edge cases
-    if max_drawdown == 0:
-        # If no drawdown, MAR is undefined (return a high value)
-        return float('inf') if cagr > 0 else 0.0
     
     # Convert max_drawdown to absolute value and calculate MAR
-    mar = cagr / abs(max_drawdown)
+    mar = cagr / max(abs(max_drawdown), dd_min)
     
     return mar
 
-def calculate_composite_score(mar, win_rate):
+def mar_signed_tanh(mar, s=50.0):
+    """
+    Calculate Managed Account Ratio (MAR) using tanh function to squash and scale the MAR value for optuna optimization
+    """
+    return float(np.tanh(mar / s))
+
+
+def trade_factor_bandpass(n_per_year, lo=800.0, hi=2000.0, k=200.0, floor=0.1):
+    s_lo = 1.0 / (1.0 + np.exp(-(n_per_year - lo) / k))
+    s_hi = 1.0 / (1.0 + np.exp(-(hi - n_per_year) / k))
+    tf = s_lo * s_hi
+    return max(tf, floor)   # never 0; still distinguishes outside-band trials 
+
+def win_edge_factor(win_rate_pct, rr, k=6.0):
+    w = win_rate_pct / 100.0
+    w_be = 1.0 / (1.0 + rr)                   # breakeven win rate
+    raw = (w - w_be) / max(1e-9, 1.0 - w_be)  # ≈ -1..1
+    return 1.0 / (1.0 + np.exp(-k * raw))     # in (0,1), =0.5 at breakeven
+
+def calculate_composite_score(mar, win_rate, rr, trade_count, start_date, end_date):
     """
     Calculate composite score that balances risk-adjusted returns and consistency
     
-    Composite Score = MAR × win_rate_adj
+    Composite Score = MAR x win_rate_adj
     
     Where:
     - MAR = CAGR / |Max Drawdown| (risk-adjusted return ratio)
-    - win_rate_adj = max(0, (win_rate - 50)/50) (penalizes win rates below 50%)
+    - WinEdgeAdj = max(0, (win_rate - W_be) / (1 - W_be)) (adjusts win rate to break even win rate)
     
     This scoring system balances both risk-adjusted returns and consistency,
     ensuring that optimization favors strategies that not only have good returns 
@@ -340,17 +413,23 @@ def calculate_composite_score(mar, win_rate):
     Args:
         mar: Managed Account Ratio (CAGR / |Max Drawdown|)
         win_rate: Win rate as percentage (e.g., 60.0 for 60%)
-    
+        rr: Risk reward ratio
+        trade_count: Number of trades
     Returns:
         Composite score (higher is better)
     """
-    # Calculate win rate adjustment factor
-    # Win rates below 50% get penalized (factor = 0)
-    # Win rates above 50% get rewarded proportionally
-    win_rate_adj = max(0, (win_rate - 50) / 50)
+
+
+    # Win rates above break even win rate get rewarded proportionally
+    WinEdgeAdj = win_edge_factor(win_rate, rr)
+    # Squash and scale the MAR value for optuna optimization
+    mar_signed = mar_signed_tanh(mar, s=50.0)
+    # Calculate Trade Factor.
+    TradeFactor = trade_factor_bandpass(calculate_n_per_year(trade_count, start_date, end_date), k=250, lo=800, hi=2000)
     
     # Calculate composite score
-    composite_score = mar * win_rate_adj
+    #composite_score = mar_signed * WinEdgeAdj * TradeFactor
+    composite_score = mar
     
     return composite_score
 

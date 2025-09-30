@@ -7,48 +7,50 @@ from datetime import datetime
 import optuna
 import json
 import math
-from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score, sanitize_features, standardize_expanding, standardize_expanding_train
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
+import cupy as cp
 
 
 symbol = "XRP_USD"
 
 # Create T and H dictionaries for default parameters
 T_default = {
-    'min_risk_percentage': 0.10156706168296842,
-    'max_risk_percentage': 0.560968740215892,
-    'risk_scaling_factor': 1.997729935382857,
-    'risk_reward_ratio': 1.5028679530064106,
-    'min_predicted_move': 0.008826652470759522,
-    'partial_take_profit': 0.7309628950065246,
-    'min_holding_period': 6,
-    'max_holding_period': 83,
-    'max_concurrent_trades': 10,
-    'stop_loss_atr_multiplier': 3.547732908433746,
-    'atr_predicted_weight': 0.4310703192463601,
-    'window_size': 27936,
-    'retrain_interval': 18606,
-    'aggressiveness': 2.3603634486172083,
-    'feature_count_k': 32
+    "min_risk_percentage": 0.18667545873693023,
+    "max_risk_percentage": 0.7333546909470524,
+    "risk_scaling_factor": 2.5184557369439187,
+    "risk_reward_ratio": 1.5264918456689758,
+    "min_predicted_move": 0.007964038055791422,
+    "partial_take_profit": 0.7091585844137864,
+    "min_holding_period": 14,
+    "max_holding_period": 81,
+    "max_concurrent_trades": 8,
+    "stop_loss_atr_multiplier": 3.9267721668435853,
+    "atr_predicted_weight": 0.6210460131734021,
+    "aggressiveness": 1.933354082966644,
+    "feature_count_k": 35,
+    "window_size": 34257,
+    "retrain_interval": 30333
 }
 
 H_default = {
-    "learning_rate": 0.03005642076836405,
-    "n_estimators": 968,
-    "max_depth": 6,
-    "max_leaves": 127,
-    "min_child_weight": 2.1107014853533137,
-    "gamma": 0.005291390227408434,
-    "subsample": 0.7153869354301697,
-    "colsample_bytree": 0.875134069516763,
-    "colsample_bylevel": 0.7188483265723933,
-    "reg_lambda": 0.5552472488751153,
-    "reg_alpha": 0.020920311615052256,
-    "max_bin": 312,
+    "learning_rate": 0.04124763223591977,
+    "n_estimators": 1268,
+    "max_depth": 5,
+    "max_leaves": 51,
+    "min_child_weight": 0.7487494959921415,
+    "gamma": 0.217123826259615,
+    "subsample": 0.6064938340420224,
+    "colsample_bytree": 0.5213054854581245,
+    "colsample_bylevel": 0.7647516429830787,
+    "reg_lambda": 1.9815198277316892,
+    "reg_alpha": 6.133298215314081e-05,
+    "max_bin": 874,
     'random_state': 42,
     'tree_method': 'hist',
+    'device': 'cpu',
 }
 
 # Fixed parameters
@@ -59,7 +61,7 @@ TAKER_FEE = 0.012  # 1.2% fee when selling (deducted from sale value)
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = False  # Set to True to use default parameters
+SKIP_OPTIMIZATION = True  # Set to True to use default parameters
 USE_FAPT = False
 OPTIMIZATION_TRIALS = 4000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
@@ -153,12 +155,16 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
     
     n = len(df_window)
     
-    # Initialize model and feature importance for first window
+    # =========================
+    # Initialize model & FI
+    # =========================
     print("\nInitializing first window...")
     initial_window = df_window.iloc[:T['window_size']].copy()
+
+    # 1) Feature importance on the initial window
     current_features = calculate_feature_importance(
-        initial_window, 
-        feature_cols, 
+        initial_window,
+        feature_cols,
         target_cols,
         model_params=H,
         iterations=1,
@@ -166,18 +172,26 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
         visualize_importance=False,
         K=T['feature_count_k']
     )
-    
+
+    # 2) Sanitize the selected features for THIS training slice
+    clean_features = sanitize_features(initial_window, current_features)
+
+    # If too few survived, fall back to generic feature_cols
+    if len(clean_features) < 3:
+        fallback = sanitize_features(initial_window, feature_cols)
+        clean_features = fallback[:max(3, min(10, len(fallback)))]
+
+    # 3) Standardize expanding (no lookahead) for the training window
+    X_initial = standardize_expanding_train(initial_window, clean_features)
+
+    # 4) Target aligned to the same rows
+    y_initial = df_window.loc[X_initial.index, target_cols].values.ravel().astype(np.float32)
+
+    # 5) Build & fit model (ensure GPU params are unified everywhere)
+    H['device'] = 'cuda'
+    H['max_bin'] = 512   # pick one value and keep it the same across all trainings
+
     model = xgb.XGBRegressor(**H)
-    
-    # Scale initial window data
-    X_initial = df_window.iloc[:T['window_size']][current_features].copy()
-    for col in current_features:
-        # Use expanding mean/std for scaling with shift to prevent look-ahead bias
-        mean = X_initial[col].expanding(min_periods=1).mean().shift(1)
-        std = X_initial[col].expanding(min_periods=1).std().shift(1)
-        X_initial[col] = (X_initial[col] - mean) / (std + 1e-8)
-    
-    y_initial = df_window.iloc[:T['window_size']][target_cols].values.ravel()
     model.fit(X_initial, y_initial)
     
     # Process data in chunks
@@ -205,40 +219,51 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
             total_data_processed = 0
         
         current_holdout = df_window.iloc[start:end].copy()
-        current_train = df_window.iloc[:start].copy()
+        current_train   = df_window.iloc[:start].copy()
 
-        # Prepare features for current training data
-        current_X_train = current_train[current_features].copy()
-        current_y_train = current_train[target_cols].values.ravel()
-        
-        # Prepare features for current holdout chunk
-        current_X_holdout = current_holdout[current_features].copy()
-        current_y_holdout = current_holdout[target_cols].values.ravel()
-        
-        # Scale features using rolling statistics
-        for col in current_features:
-            mean = current_X_train[col].expanding(min_periods=1).mean().shift(1)
-            std = current_X_train[col].expanding(min_periods=1).std().shift(1)
-            current_X_train[col] = (current_X_train[col] - mean) / (std + 1e-8)
-            last_mean = mean.iloc[-1]
-            last_std = std.iloc[-1]
-            current_X_holdout[col] = (current_X_holdout[col] - last_mean) / (last_std + 1e-8)
-        
-        # Train model on current training data
-        current_model = xgb.XGBRegressor(**H)
-        current_model.fit(current_X_train, current_y_train)
+        # 1) sanitize feature list for THIS train slice
+        clean_features = sanitize_features(current_train, current_features)
 
-        # Make predictions on current holdout chunk
-        chunk_predictions = current_model.predict(current_X_holdout)
+        # fail early if too few features survived
+        if len(clean_features) < 3:
+            # fallback: keep top-3 present numeric features from feature_cols
+            fallback = sanitize_features(current_train, feature_cols)
+            clean_features = fallback[:max(3, min(10, len(fallback)))]
+
+        # 2) standardize with identical order & dtype
+        Xtr, Xho = standardize_expanding(current_train, current_holdout, clean_features)
+        ytr = current_train[target_cols].values.ravel().astype(np.float32)
+        yho = current_holdout[target_cols].values.ravel().astype(np.float32)
+
+        # 3) train
+        model = xgb.XGBRegressor(**H)
+        model.fit(Xtr, ytr)
+
+        # 4) lock the exact order booster expects; reindex holdout defensively
+        expected_order = model.get_booster().feature_names
+        # (When fitting with pandas, xgboost keeps column names in order.)
+        # Reindex just in case
+        Xho = Xho.reindex(columns=expected_order)
+        Xho_cu = cp.asarray(Xho.values, dtype=np.float32)
+
+        # Optional: assert to catch mismatches immediately
+        assert list(Xtr.columns) == expected_order, "Train column order mismatch"
+        assert list(Xho.columns) == expected_order, "Holdout column order mismatch"
+
+        # 5) predict
+        booster = model.get_booster()
+        preds_cu = booster.inplace_predict(Xho_cu)
+        chunk_predictions = cp.asnumpy(preds_cu).astype(np.float32, copy=False)
+
+        # write back
         df_window.loc[df_window.index[start:end], 'Predicted_Change'] = chunk_predictions
-
         holdout_predictions.extend(chunk_predictions)
-        holdout_actuals.extend(current_y_holdout)    
+        holdout_actuals.extend(yho)
 
         # Calculate metrics for this chunk
-        chunk_mse = mean_squared_error(current_y_holdout, chunk_predictions)
-        chunk_r2 = r2_score(current_y_holdout, chunk_predictions)
-        chunk_dir_acc = np.mean((current_y_holdout > 0) == (chunk_predictions > 0))
+        chunk_mse = mean_squared_error(yho, chunk_predictions)
+        chunk_r2 = r2_score(yho, chunk_predictions)
+        chunk_dir_acc = np.mean((yho > 0) == (chunk_predictions > 0))
         
         rolling_metrics.append({
             'Start_Date': current_holdout.index[0],
@@ -276,7 +301,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
             min_holding_period = fapt_params['parameters']['min_holding_period']
             max_holding_period = fapt_params['parameters']['max_holding_period']
             max_concurrent_trades = fapt_params['parameters']['max_concurrent_trades']
-        
+
         # Run trading for this window
         for idx in range(start, end):
             row = df_window.iloc[idx]
@@ -808,9 +833,9 @@ def objective(trial):
     # Run strategy with current parameters and trial-specific data
     metrics = run_strategy(df_trial, T, H, feature_cols, target_cols)
     
-    # If no trades were made, return a very low score
+    # If no trades were made, prune the trial
     if metrics['trade_count'] == 0:
-        return -100.0  # Return a high drawdown value for no trades
+        raise optuna.TrialPruned()
     
     # Store metrics as trial attributes
     trial.set_user_attr('total_return', metrics['total_return'])
@@ -829,7 +854,7 @@ def objective(trial):
     trial.set_user_attr('equity_curve', equity_curve_dict)
     
     # Calculate composite score that balances multiple objectives
-    composite_score = calculate_composite_score(metrics['mar'], metrics['win_rate'])
+    composite_score = calculate_composite_score(metrics['mar'], metrics['win_rate'], T['risk_reward_ratio'], metrics['trade_count'], start_date, end_date)
     
     # Save top parameters after each trial
     save_top_parameters(study, symbol)
@@ -890,7 +915,7 @@ if __name__ == "__main__":
         best_metrics = run_strategy(df, T_default, H_default, feature_cols, target_cols)
         
         # Calculate composite score for default parameters
-        composite_score = calculate_composite_score(best_metrics['mar'], best_metrics['win_rate'])
+        composite_score = calculate_composite_score(best_metrics['mar'], best_metrics['win_rate'], T_default['risk_reward_ratio'], best_metrics['trade_count'], start_date, end_date)
         
         results = [{
             # Trading parameters
