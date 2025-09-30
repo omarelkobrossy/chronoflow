@@ -11,7 +11,6 @@ from utils import preprocess_data, calculate_feature_importance, clamp, calculat
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
-import cupy as cp
 
 
 symbol = "XRP_USD"
@@ -50,7 +49,7 @@ H_default = {
     "max_bin": 874,
     'random_state': 42,
     'tree_method': 'hist',
-    'device': 'cpu',
+    'device': 'cuda',
 }
 
 # Fixed parameters
@@ -238,6 +237,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
         # 3) train
         model = xgb.XGBRegressor(**H)
         model.fit(Xtr, ytr)
+        import cupy as cp
 
         # 4) lock the exact order booster expects; reindex holdout defensively
         expected_order = model.get_booster().feature_names
@@ -302,249 +302,229 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
             max_holding_period = fapt_params['parameters']['max_holding_period']
             max_concurrent_trades = fapt_params['parameters']['max_concurrent_trades']
 
-        # Run trading for this window
+        # --- prebind arrays and constants once ---
+        High   = df_window['High'  ].to_numpy(np.float64, copy=False)
+        Low    = df_window['Low'   ].to_numpy(np.float64, copy=False)
+        Open   = df_window['Open'  ].to_numpy(np.float64, copy=False)
+        Close  = df_window['Close' ].to_numpy(np.float64, copy=False)
+        Pred   = df_window['Predicted_Change'].to_numpy(np.float64, copy=False)
+        ATRarr = (df_window['ATR'].to_numpy(np.float64, copy=False)
+                  if 'ATR' in df_window.columns else None)
+
+        SLIP_M = 1.0 - SLIPPAGE
+        f_maker = MAKER_FEE
+        f_taker = TAKER_FEE
+
+        min_hold = T['min_holding_period']
+        max_hold = T['max_holding_period']
+        max_conc = T['max_concurrent_trades']
+        min_move = T['min_predicted_move']
+        atr_w    = T['atr_predicted_weight']
+        atr_mult = T['stop_loss_atr_multiplier']
+        rr       = T['risk_reward_ratio']
+        ptp_frac = T['partial_take_profit']   # 0..1
+        agg      = T['aggressiveness']
+        min_rp   = T['min_risk_percentage']
+        max_rp   = T['max_risk_percentage']
+        scale_f  = T['risk_scaling_factor']
+
+        # tiny helpers (avoid repeated code)
+        def profit_after_maker(exit_price, entry_price, size):
+            # maker fee charged on sale value
+            sale_value = exit_price * size
+            gross = (exit_price - entry_price) * size
+            return gross - sale_value * f_maker, sale_value * f_maker
+
+        def entry_cost_with_taker(entry_price, size):
+            base = entry_price * size
+            taker_fee_amount = base * f_taker
+            return base + taker_fee_amount, taker_fee_amount  # trade_value (cash out), fee
+
+        def hybrid_stop_distance(p_in, atr_val, pred_move):
+            atr_stop = (atr_val if atr_val is not None else p_in * 0.01) * atr_mult
+            pred_stop = p_in * pred_move
+            return atr_w * atr_stop + (1.0 - atr_w) * pred_stop
+
+        def tp_for_partial(p_entry, p_tp):
+            # adjust for maker fee on exit to keep net fraction consistent
+            maker_factor = 1.0 - f_maker
+            return p_entry + ptp_frac * (p_tp - p_entry) / maker_factor
+
+        # --- main loop ---
         for idx in range(start, end):
-            row = df_window.iloc[idx]
-            
-            # Update open trades
-            closed_trades = []
-            for trade in open_trades:
-                high = row['High']
-                low = row['Low']
-                holding_period = idx - trade['entry_idx']
-                
-                if high >= trade['take_profit']:
-                    exit_price = trade['take_profit'] * (1 - SLIPPAGE)
-                    # Calculate profit with Maker fee (0.6% deducted from sale value)
-                    gross_profit = (exit_price - trade['entry_price']) * trade['size']
-                    sale_value = exit_price * trade['size']
-                    maker_fee_amount = sale_value * MAKER_FEE
-                    profit = gross_profit - maker_fee_amount
-                    
-                    # Update cash ledger
-                    cash_ledger.close_trade(trade['trade_value'], profit, maker_fee_amount)
-                    
-                    trade['exit_idx'] = idx
-                    trade['exit_price'] = exit_price
-                    trade['result'] = 'TP'
-                    trade['profit'] = profit
-                    trade_history.append(trade)
-                    closed_trades.append(trade)
-                elif low <= trade['stop_loss']:
-                    exit_price = trade['stop_loss'] * (1 - SLIPPAGE)
-                    # Calculate profit with Maker fee (0.6% deducted from sale value)
-                    gross_profit = (exit_price - trade['entry_price']) * trade['size']
-                    sale_value = exit_price * trade['size']
-                    maker_fee_amount = sale_value * MAKER_FEE
-                    profit = gross_profit - maker_fee_amount
-                    
-                    # Update cash ledger
-                    cash_ledger.close_trade(trade['trade_value'], profit, maker_fee_amount)
-                    
-                    trade['exit_idx'] = idx
-                    trade['exit_price'] = exit_price
-                    trade['result'] = 'SL'
-                    trade['profit'] = profit
-                    trade_history.append(trade)
-                    closed_trades.append(trade)
-                elif holding_period >= T['min_holding_period']:
-                    projected_tp = trade['take_profit']
-                    projected_entry = trade['entry_price']
-                    # Calculate partial take profit with fee compensation
-                    # The partial TP should be adjusted to account for the maker fee
-                    maker_fee_factor = 1 - MAKER_FEE
-                    tp_partial = projected_entry + T['partial_take_profit'] * (projected_tp - projected_entry) / maker_fee_factor
+            high = High[idx]
+            low  = Low[idx]
+            cl   = Close[idx]
+
+            # ---------- update open trades ----------
+            # iterate by index, build list of survivors (avoid 'not in' scans)
+            survivors = []
+            for t in open_trades:
+                entry_idx   = t['entry_idx']
+                entry_price = t['entry_price']
+                tp          = t['take_profit']
+                sl          = t['stop_loss']
+                size        = t['size']
+
+                holding = idx - entry_idx
+                closed  = False
+
+                # 1) TP hit?
+                if high >= tp:
+                    exit_price = tp * SLIP_M
+                    pnl, maker_fee_amount = profit_after_maker(exit_price, entry_price, size)
+                    cash_ledger.close_trade(t['trade_value'], pnl, maker_fee_amount)
+
+                    t['exit_idx']  = idx
+                    t['exit_price'] = exit_price
+                    t['result']    = 'TP'
+                    t['profit']    = pnl
+                    trade_history.append(t)
+                    closed = True
+
+                # 2) SL hit (only if not closed)
+                elif low <= sl:
+                    exit_price = sl * SLIP_M
+                    pnl, maker_fee_amount = profit_after_maker(exit_price, entry_price, size)
+                    cash_ledger.close_trade(t['trade_value'], pnl, maker_fee_amount)
+
+                    t['exit_idx']  = idx
+                    t['exit_price'] = exit_price
+                    t['result']    = 'SL'
+                    t['profit']    = pnl
+                    trade_history.append(t)
+                    closed = True
+
+                # 3) Time-based rules
+                elif holding >= min_hold:
+                    projected_tp    = tp
+                    projected_entry = entry_price
+                    tp_partial      = tp_for_partial(projected_entry, projected_tp)
+
                     if high >= tp_partial:
-                        exit_price = tp_partial * (1 - SLIPPAGE)
-                        # Calculate profit with Maker fee (0.6% deducted from sale value)
-                        gross_profit = (exit_price - trade['entry_price']) * trade['size']
-                        sale_value = exit_price * trade['size']
-                        maker_fee_amount = sale_value * MAKER_FEE
-                        profit = gross_profit - maker_fee_amount
-                        
-                        # Update cash ledger
-                        cash_ledger.close_trade(trade['trade_value'], profit, maker_fee_amount)
-                        
-                        trade['exit_idx'] = idx
-                        trade['exit_price'] = exit_price
-                        trade['result'] = 'Partial TP'
-                        trade['profit'] = profit
-                        trade_history.append(trade)
-                        closed_trades.append(trade)
+                        exit_price = tp_partial * SLIP_M
+                        pnl, maker_fee_amount = profit_after_maker(exit_price, entry_price, size)
+                        cash_ledger.close_trade(t['trade_value'], pnl, maker_fee_amount)
+
+                        t['exit_idx']  = idx
+                        t['exit_price'] = exit_price
+                        t['result']    = 'Partial TP'
+                        t['profit']    = pnl
+                        trade_history.append(t)
+                        closed = True
+
                     elif low <= projected_entry:
-                        exit_price = projected_entry * (1 - SLIPPAGE)
-                        # Calculate profit with Maker fee (0.6% deducted from sale value)
-                        gross_profit = (exit_price - trade['entry_price']) * trade['size']
-                        sale_value = exit_price * trade['size']
-                        maker_fee_amount = sale_value * MAKER_FEE
-                        profit = gross_profit - maker_fee_amount
-                        
-                        # Update cash ledger
-                        cash_ledger.close_trade(trade['trade_value'], profit, maker_fee_amount)
-                        
-                        trade['exit_idx'] = idx
-                        trade['exit_price'] = exit_price
-                        trade['result'] = 'BE'
-                        trade['profit'] = profit
-                        trade_history.append(trade)
-                        closed_trades.append(trade)
-                
-                if holding_period >= T['max_holding_period'] and trade not in closed_trades:
-                    exit_price = row['Close'] * (1 - SLIPPAGE)
-                    # Calculate profit with Maker fee (0.6% deducted from sale value)
-                    gross_profit = (exit_price - trade['entry_price']) * trade['size']
-                    sale_value = exit_price * trade['size']
-                    maker_fee_amount = sale_value * MAKER_FEE
-                    profit = gross_profit - maker_fee_amount
-                    
-                    # Update cash ledger
-                    cash_ledger.close_trade(trade['trade_value'], profit, maker_fee_amount)
-                    
-                    trade['exit_idx'] = idx
-                    trade['exit_price'] = exit_price
-                    trade['result'] = 'MAXHOLD'
-                    trade['profit'] = profit
-                    trade_history.append(trade)
-                    closed_trades.append(trade)
-            
-            open_trades = [t for t in open_trades if t not in closed_trades]
-            
-            # Entry logic
-            if len(open_trades) < T['max_concurrent_trades']:
-                if row['Predicted_Change'] < -T['min_predicted_move']:
-                    entry_price = row['Open'] * (1 + SLIPPAGE)
-                    
-                    predicted_move = abs(row['Predicted_Change'])
-                    
-                    # Calculate how much the predicted move exceeds the minimum threshold
-                    move_excess_ratio = (predicted_move - T['min_predicted_move']) / T['min_predicted_move']
-                    
-                    # Apply aggressiveness scaling: higher aggressiveness = faster scaling to max risk
-                    # aggressiveness=1: linear scaling, aggressiveness=2: quadratic scaling, etc.
-                    scaled_excess = move_excess_ratio ** (1 / T['aggressiveness'])
-                    
-                    # Calculate risk percentage with aggressiveness-controlled scaling
-                    risk_percentage = min(
-                        T['min_risk_percentage'] + (T['max_risk_percentage'] - T['min_risk_percentage']) * min(scaled_excess * T['risk_scaling_factor'], 1.0),
-                        T['max_risk_percentage']
-                    )
-                    
-                    # Use the cash ledger to get accurate available cash
+                        exit_price = projected_entry * SLIP_M
+                        pnl, maker_fee_amount = profit_after_maker(exit_price, entry_price, size)
+                        cash_ledger.close_trade(t['trade_value'], pnl, maker_fee_amount)
+
+                        t['exit_idx']  = idx
+                        t['exit_price'] = exit_price
+                        t['result']    = 'BE'
+                        t['profit']    = pnl
+                        trade_history.append(t)
+                        closed = True
+
+                # 4) Max holding (if still open)
+                if (not closed) and (holding >= max_hold):
+                    exit_price = cl * SLIP_M
+                    pnl, maker_fee_amount = profit_after_maker(exit_price, entry_price, size)
+                    cash_ledger.close_trade(t['trade_value'], pnl, maker_fee_amount)
+
+                    t['exit_idx']  = idx
+                    t['exit_price'] = exit_price
+                    t['result']    = 'MAXHOLD'
+                    t['profit']    = pnl
+                    trade_history.append(t)
+                    closed = True
+
+                if not closed:
+                    survivors.append(t)
+
+            open_trades = survivors
+
+            # ---------- entry logic ----------
+            if len(open_trades) < max_conc:
+                pred = Pred[idx]
+                if pred < -min_move:
+                    entry_price = Open[idx] * (1.0 + SLIPPAGE)
+                    predicted_move = -pred  # abs for short signal since pred < -min_move
+
+                    # aggressiveness scaling
+                    move_excess_ratio = (predicted_move - min_move) / min_move
+                    if move_excess_ratio < 0:
+                        continue
+                    scaled_excess = move_excess_ratio ** (1.0 / agg)
+                    risk_pct = min(min_rp + (max_rp - min_rp) * min(scaled_excess * scale_f, 1.0), max_rp)
+
                     available_cash = cash_ledger.available_cash
-                    #print(f"available_cash: {available_cash}")
-                    
-                    # Only proceed if we have enough cash for this trade
                     if available_cash <= 0:
                         continue
                     
-                    # Debug: Show cash management for first few trades
-                    # if len(trade_history) < 5:
-                    #     status = cash_ledger.get_status()
-                    #     print(f"  Trade #{len(trade_history)+1}: Total Capital=${status['total_capital']:.2f}, Available Cash=${available_cash:.2f}, Invested=${status['invested_cash']:.2f}")
-                    
-                    # Use available cash for risk calculation
-                    risk_amount = available_cash * risk_percentage
-                    # Calculate stop loss and take profit using hybrid ATR and predicted move approach
-                    atr_value = row['ATR'] if 'ATR' in row else row['Close'] * 0.01  # Fallback to 1% if ATR not available
-                    
-                    # Calculate stop loss distance using hybrid approach
-                    atr_stop_distance = atr_value * T['stop_loss_atr_multiplier']
-                    predicted_stop_distance = entry_price * predicted_move  # Convert predicted move to price distance
-                    
-                    # Weighted combination of ATR and predicted move
-                    stop_loss_distance = (T['atr_predicted_weight'] * atr_stop_distance + 
-                                        (1 - T['atr_predicted_weight']) * predicted_stop_distance)
-                    
-                    # Calculate fee compensation factors
-                    P_in = entry_price
-                    f_e = TAKER_FEE
-                    f_tp = MAKER_FEE
-                    f_sl = TAKER_FEE
+                    risk_amount = available_cash * risk_pct
 
-                    # Calculate minimum stop loss distance to cover fees
-                    # T_floor = P_in * (f_e + f_sl) ensures we don't lose money on fees
-                    T_floor = P_in * (f_e + f_sl)
-                    
-                    if stop_loss_distance < T_floor:
+                    atr_val = ATRarr[idx] if ATRarr is not None else None
+                    stop_dist = hybrid_stop_distance(entry_price, atr_val, predicted_move)
+
+                    P_in = entry_price
+                    T_floor = P_in * (f_taker + f_taker)  # entry taker + exit taker (worst case); adjust to your policy
+
+                    if stop_dist < T_floor:
+                        # skip trades that can't clear fees given tiny expected move
                         continue
                     
-                    # Calculate stop loss price (must be below entry for long trades)
-                    P_sl = (P_in * (1 + f_e) - stop_loss_distance) / (1 - f_sl)
-                    
-                    # Calculate risk-reward distance
-                    T_rr = stop_loss_distance * T['risk_reward_ratio']
-                    
-                    # Calculate take profit price (must be above entry for long trades)
-                    P_tp = (P_in * (1 + f_e) + T_rr) / (1 - f_tp)
+                    # fee-aware bracket
+                    P_sl = (P_in * (1.0 + f_taker) - stop_dist) / (1.0 - f_taker)
+                    T_rr = stop_dist * rr
+                    P_tp = (P_in * (1.0 + f_taker) + T_rr) / (1.0 - f_maker)
 
-                    P_be_tp = P_in * (1 + f_e) / (1 - f_tp)
+                    # size by allocation
+                    size = risk_amount / P_in
+                    if size <= 0:
+                        continue
                     
-                    # Validate that stop loss is below entry and take profit is above stop loss
-                    # if P_sl >= P_in or P_tp <= P_sl:
-                    #     print(f"WARNING: Invalid price levels - Entry: {P_in:.4f}, SL: {P_sl:.4f}, TP: {P_tp:.4f}")
-                    #     print(f"  stop_loss_distance: {stop_loss_distance:.6f}, T_floor: {T_floor:.6f}")
-                    #     continue  # Skip this trade
-
-                    size = min(risk_amount / entry_price, available_cash / entry_price)
-                    
-                    if size <= 0: continue
-                    
-                    # Calculate trade value with Taker fee (1.2% added to trade value)
-                    base_trade_value = entry_price * size
-                    taker_fee_amount = base_trade_value * TAKER_FEE
-                    trade_value = base_trade_value + taker_fee_amount
-
-                    # print(f"Entry price: {P_in}, Stop loss: {P_sl}, Take profit: {P_tp}, Size: {size}, Trade value: {trade_value}, Bracket size: {T_rr}")
-                    
-                    # Final check: ensure we don't exceed available cash
+                    # ensure cash fit (entry taker fee included)
+                    trade_value, taker_fee_amount = entry_cost_with_taker(P_in, size)
                     if trade_value > available_cash:
-                        # Reduce size to fit available cash
-                        max_base_value = available_cash / (1 + TAKER_FEE)  # Fixed: use (1 + TAKER_FEE) not (1 - TAKER_FEE)
-                        size = np.floor(max_base_value / entry_price)
+                        max_base_value = available_cash / (1.0 + f_taker)
+                        size = max_base_value / P_in
                         if size <= 0:
                             continue
-                        base_trade_value = entry_price * size
-                        taker_fee_amount = base_trade_value * TAKER_FEE
-                        trade_value = base_trade_value + taker_fee_amount
-                    
-                    # Update cash ledger when opening trade
+                        trade_value, taker_fee_amount = entry_cost_with_taker(P_in, size)
+
                     try:
                         cash_ledger.open_trade(trade_value, taker_fee_amount)
-                    except ValueError as e:
-                        # Skip this trade if insufficient cash
+                    except ValueError:
                         continue
-                        
+                    
                     open_trades.append({
                         'entry_idx': idx,
-                        'entry_price': entry_price,
+                        'entry_price': P_in,
                         'stop_loss': P_sl,
                         'take_profit': P_tp,
                         'size': size,
-                        'capital_at_entry': cash_ledger.get_total_capital(),  # Store current capital
-                        'trade_value': trade_value,  # Store the value of the trade
-                        'predicted_change': row['Predicted_Change'],
-                        'risk_percentage': risk_percentage,
+                        'capital_at_entry': cash_ledger.get_total_capital(),
+                        'trade_value': trade_value,
+                        'predicted_change': pred,
+                        'risk_percentage': risk_pct,
                         'result': None,
                         'exit_idx': None,
                         'exit_price': None,
                         'profit': None
                     })
-            
-            # Calculate total portfolio value (cash + open trade values) for every bar
-            open_trades_market_value = 0.0
-            for trade in open_trades:
-                # Calculate current value of open trade based on current price
-                current_price = row['Close']
-                trade_current_value = current_price * trade['size']
-                # P&L from entry (trade_value already includes Taker fee)
-                trade_pnl = trade_current_value - trade['trade_value']
-                open_trades_market_value += trade_pnl
-            
-            total_portfolio_value = cash_ledger.get_portfolio_value(open_trades_market_value)
-            
-            # Update equity curve (adjust index for trading period only)
+
+            # ---------- portfolio valuation ----------
+            # sum current PnL of open trades (cash_ledger tracks fees)
+            mv = 0.0
+            if open_trades:
+                cp = cl
+                for t in open_trades:
+                    mv += cp * t['size'] - t['trade_value']
+
+            total_portfolio_value = cash_ledger.get_portfolio_value(mv)
             equity_curve.iloc[idx - trading_start_idx] = np.float64(total_portfolio_value)
-    
+
+
     # Close any remaining open trades
     for trade in open_trades:
         exit_price = df_window.iloc[-1]['Close'] * (1 - SLIPPAGE)
@@ -794,7 +774,7 @@ def objective(trial):
         'max_bin': trial.suggest_int("max_bin", 256, 1024),
         'random_state': 42,
         'tree_method': 'hist',
-        'device': 'cpu'
+        'device': 'cuda'
     }
     
     # Debug: Print parameters for first few trials to verify they match defaults when hardcoded
@@ -1052,7 +1032,7 @@ if __name__ == "__main__":
             'max_bin': best_params['max_bin'],
             'random_state': 42,
             'tree_method': 'hist',
-            'device': 'cpu'
+            'device': 'cuda'
         }
         
         # Filter data for the best parameters using the same logic as in objective function
