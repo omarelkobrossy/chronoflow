@@ -215,7 +215,29 @@ def calculate_feature_importance(
     iterations = max(1, int(iterations))
     batch_size = max(1, n // iterations)
 
-    feat_names = list(feature_cols)
+    # Vectorized filtering using dtype masks
+    available_cols = set(df.columns)
+    requested_cols = set(feature_cols)
+    
+    # Find columns that exist in both requested features and dataframe
+    valid_cols = list(requested_cols.intersection(available_cols))
+    
+    if not valid_cols:
+        raise ValueError("No requested features found in dataframe")
+    
+    # Get numeric columns using vectorized dtype check
+    numeric_mask = df[valid_cols].select_dtypes(include=[np.number]).columns
+    feat_names = list(numeric_mask)
+    
+    # Report excluded columns
+    excluded_cols = set(valid_cols) - set(feat_names)
+    if excluded_cols:
+        print(f"Excluded {len(excluded_cols)} non-numeric columns: {sorted(excluded_cols)}")
+    
+    if not feat_names:
+        raise ValueError("No valid numeric features found for feature importance calculation")
+    
+    print(f"Using {len(feat_names)} numeric features for importance calculation")
     target_name = target_cols if isinstance(target_cols, str) else target_cols[0]
 
     # Accumulate GAIN sums (not lists) to save memory
@@ -339,7 +361,7 @@ def clamp(value, min_value, max_value):
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
     """Calculate Sharpe ratio from returns series"""
     excess_returns = returns - risk_free_rate
-    return np.sqrt(252) * excess_returns.mean() / (excess_returns.std() + 1e-8)
+    return np.sqrt(365) * excess_returns.mean() / (excess_returns.std() + 1e-8)
 
 def calculate_max_drawdown(equity_curve):
     """Calculate maximum drawdown from equity curve"""
@@ -601,6 +623,207 @@ def analyze_window_features(df_window):
     return feature_metrics
 
 
+def analyze_confidence_vs_success(trade_history_df, symbol):
+    """
+    Analyze the relationship between prediction confidence and trade success.
+    Creates charts showing how trade performance varies with confidence levels.
+    """
+    if len(trade_history_df) == 0:
+        print("No trades to analyze for confidence vs success relationship.")
+        return
+    
+    # Create confidence categories based on predicted change magnitude
+    trade_history_df['confidence_level'] = pd.cut(
+        abs(trade_history_df['predicted_change']), 
+        bins=5, 
+        labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+    )
+    
+    # Create risk percentage categories
+    trade_history_df['risk_level'] = pd.cut(
+        trade_history_df['risk_percentage'] * 100,
+        bins=5,
+        labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+    )
+    
+    # Calculate metrics by confidence level
+    confidence_analysis = trade_history_df.groupby('confidence_level').agg({
+        'profit': ['count', 'mean', 'std'],
+        'predicted_change': 'mean',
+        'risk_percentage': 'mean'
+    }).round(4)
+    
+    # Flatten column names
+    confidence_analysis.columns = ['Trade_Count', 'Avg_Profit', 'Profit_Std', 'Avg_Predicted_Change', 'Avg_Risk_Pct']
+    confidence_analysis['Win_Rate'] = trade_history_df.groupby('confidence_level')['profit'].apply(lambda x: (x > 0).mean() * 100).round(2)
+    confidence_analysis['Profit_Per_Trade'] = confidence_analysis['Avg_Profit'] / confidence_analysis['Trade_Count']
+    
+    # Calculate metrics by risk level
+    risk_analysis = trade_history_df.groupby('risk_level').agg({
+        'profit': ['count', 'mean', 'std'],
+        'predicted_change': 'mean',
+        'risk_percentage': 'mean'
+    }).round(4)
+    
+    risk_analysis.columns = ['Trade_Count', 'Avg_Profit', 'Profit_Std', 'Avg_Predicted_Change', 'Avg_Risk_Pct']
+    risk_analysis['Win_Rate'] = trade_history_df.groupby('risk_level')['profit'].apply(lambda x: (x > 0).mean() * 100).round(2)
+    risk_analysis['Profit_Per_Trade'] = risk_analysis['Avg_Profit'] / risk_analysis['Trade_Count']
+    
+    # Create visualization directory
+    os.makedirs('DB/charts', exist_ok=True)
+    
+    # Create comprehensive confidence analysis chart
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle(f'{symbol} - Prediction Confidence vs Trade Success Analysis', fontsize=16, fontweight='bold')
+    
+    # 1. Win Rate by Confidence Level
+    axes[0, 0].bar(confidence_analysis.index, confidence_analysis['Win_Rate'], 
+                   color=['#ff7f7f', '#ffbf7f', '#ffff7f', '#bfff7f', '#7fff7f'])
+    axes[0, 0].set_title('Win Rate by Prediction Confidence')
+    axes[0, 0].set_ylabel('Win Rate (%)')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    
+    # 2. Average Profit by Confidence Level
+    colors = ['red' if x < 0 else 'green' for x in confidence_analysis['Avg_Profit']]
+    axes[0, 1].bar(confidence_analysis.index, confidence_analysis['Avg_Profit'], color=colors)
+    axes[0, 1].set_title('Average Profit by Prediction Confidence')
+    axes[0, 1].set_ylabel('Average Profit ($)')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    axes[0, 1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    
+    # 3. Trade Count by Confidence Level
+    axes[0, 2].bar(confidence_analysis.index, confidence_analysis['Trade_Count'], 
+                   color='skyblue', alpha=0.7)
+    axes[0, 2].set_title('Trade Count by Prediction Confidence')
+    axes[0, 2].set_ylabel('Number of Trades')
+    axes[0, 2].tick_params(axis='x', rotation=45)
+    
+    # 4. Win Rate by Risk Level
+    axes[1, 0].bar(risk_analysis.index, risk_analysis['Win_Rate'], 
+                   color=['#ff7f7f', '#ffbf7f', '#ffff7f', '#bfff7f', '#7fff7f'])
+    axes[1, 0].set_title('Win Rate by Risk Level')
+    axes[1, 0].set_ylabel('Win Rate (%)')
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # 5. Average Profit by Risk Level
+    colors = ['red' if x < 0 else 'green' for x in risk_analysis['Avg_Profit']]
+    axes[1, 1].bar(risk_analysis.index, risk_analysis['Avg_Profit'], color=colors)
+    axes[1, 1].set_title('Average Profit by Risk Level')
+    axes[1, 1].set_ylabel('Average Profit ($)')
+    axes[1, 1].tick_params(axis='x', rotation=45)
+    axes[1, 1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    
+    # 6. Scatter plot: Predicted Change vs Actual Profit
+    scatter = axes[1, 2].scatter(trade_history_df['predicted_change'], trade_history_df['profit'], 
+                                c=trade_history_df['risk_percentage'], cmap='viridis', alpha=0.6)
+    axes[1, 2].set_title('Predicted Change vs Actual Profit')
+    axes[1, 2].set_xlabel('Predicted Change')
+    axes[1, 2].set_ylabel('Actual Profit ($)')
+    axes[1, 2].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    axes[1, 2].axvline(x=0, color='black', linestyle='-', alpha=0.3)
+    plt.colorbar(scatter, ax=axes[1, 2], label='Risk Percentage')
+    
+    plt.tight_layout()
+    plt.savefig(f'DB/charts/{symbol}_confidence_vs_success_analysis.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create detailed correlation analysis
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig.suptitle(f'{symbol} - Detailed Confidence Analysis', fontsize=14, fontweight='bold')
+    
+    # Correlation heatmap
+    correlation_data = trade_history_df[['predicted_change', 'risk_percentage', 'profit', 'size', 'trade_value']].corr()
+    im = axes[0].imshow(correlation_data, cmap='RdBu_r', vmin=-1, vmax=1)
+    axes[0].set_xticks(range(len(correlation_data.columns)))
+    axes[0].set_yticks(range(len(correlation_data.columns)))
+    axes[0].set_xticklabels(correlation_data.columns, rotation=45)
+    axes[0].set_yticklabels(correlation_data.columns)
+    axes[0].set_title('Correlation Matrix')
+    
+    # Add correlation values to heatmap
+    for i in range(len(correlation_data.columns)):
+        for j in range(len(correlation_data.columns)):
+            text = axes[0].text(j, i, f'{correlation_data.iloc[i, j]:.2f}',
+                               ha="center", va="center", color="black", fontweight='bold')
+    
+    # Profit distribution by confidence level
+    confidence_levels = trade_history_df['confidence_level'].unique()
+    colors = ['#ff7f7f', '#ffbf7f', '#ffff7f', '#bfff7f', '#7fff7f']
+    
+    for i, level in enumerate(confidence_levels):
+        if pd.notna(level):
+            level_data = trade_history_df[trade_history_df['confidence_level'] == level]['profit']
+            axes[1].hist(level_data, alpha=0.6, label=f'{level}', color=colors[i], bins=20)
+    
+    axes[1].set_title('Profit Distribution by Confidence Level')
+    axes[1].set_xlabel('Profit ($)')
+    axes[1].set_ylabel('Frequency')
+    axes[1].legend()
+    axes[1].axvline(x=0, color='black', linestyle='--', alpha=0.5)
+    
+    plt.tight_layout()
+    plt.savefig(f'DB/charts/{symbol}_detailed_confidence_analysis.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Print summary statistics
+    print(f"\n{'='*60}")
+    print(f"CONFIDENCE VS SUCCESS ANALYSIS - {symbol}")
+    print(f"{'='*60}")
+    
+    print("\n📊 CONFIDENCE LEVEL ANALYSIS:")
+    print("-" * 40)
+    for level in confidence_analysis.index:
+        if pd.notna(level):
+            row = confidence_analysis.loc[level]
+            print(f"{level:>10}: {row['Trade_Count']:>3} trades | "
+                  f"Win Rate: {row['Win_Rate']:>5.1f}% | "
+                  f"Avg Profit: ${row['Avg_Profit']:>7.2f} | "
+                  f"Avg Predicted Change: {row['Avg_Predicted_Change']:>6.4f}")
+    
+    print("\n🎯 RISK LEVEL ANALYSIS:")
+    print("-" * 40)
+    for level in risk_analysis.index:
+        if pd.notna(level):
+            row = risk_analysis.loc[level]
+            print(f"{level:>10}: {row['Trade_Count']:>3} trades | "
+                  f"Win Rate: {row['Win_Rate']:>5.1f}% | "
+                  f"Avg Profit: ${row['Avg_Profit']:>7.2f} | "
+                  f"Avg Risk %: {row['Avg_Risk_Pct']*100:>5.1f}%")
+    
+    # Calculate key insights
+    high_conf_trades = trade_history_df[trade_history_df['confidence_level'].isin(['High', 'Very High'])]
+    low_conf_trades = trade_history_df[trade_history_df['confidence_level'].isin(['Low', 'Very Low'])]
+    
+    if len(high_conf_trades) > 0 and len(low_conf_trades) > 0:
+        high_conf_win_rate = (high_conf_trades['profit'] > 0).mean() * 100
+        low_conf_win_rate = (low_conf_trades['profit'] > 0).mean() * 100
+        high_conf_avg_profit = high_conf_trades['profit'].mean()
+        low_conf_avg_profit = low_conf_trades['profit'].mean()
+        
+        print(f"\n🔍 KEY INSIGHTS:")
+        print("-" * 40)
+        print(f"High Confidence Trades: {len(high_conf_trades):>3} trades | "
+              f"Win Rate: {high_conf_win_rate:>5.1f}% | "
+              f"Avg Profit: ${high_conf_avg_profit:>7.2f}")
+        print(f"Low Confidence Trades:  {len(low_conf_trades):>3} trades | "
+              f"Win Rate: {low_conf_win_rate:>5.1f}% | "
+              f"Avg Profit: ${low_conf_avg_profit:>7.2f}")
+        
+        if high_conf_win_rate > low_conf_win_rate:
+            print(f"✅ High confidence trades have {high_conf_win_rate - low_conf_win_rate:.1f}% higher win rate")
+        else:
+            print(f"❌ Low confidence trades have {low_conf_win_rate - high_conf_win_rate:.1f}% higher win rate")
+            
+        if high_conf_avg_profit > low_conf_avg_profit:
+            print(f"✅ High confidence trades have ${high_conf_avg_profit - low_conf_avg_profit:.2f} higher average profit")
+        else:
+            print(f"❌ Low confidence trades have ${low_conf_avg_profit - high_conf_avg_profit:.2f} higher average profit")
+    
+    print(f"\n📈 Charts saved to:")
+    print(f"   - DB/charts/{symbol}_confidence_vs_success_analysis.png")
+    print(f"   - DB/charts/{symbol}_detailed_confidence_analysis.png")
+    print(f"{'='*60}")
+
 def send_telegram_message(message: str):
     """
     Sends a message to a Telegram chat using a bot.
@@ -615,3 +838,28 @@ def send_telegram_message(message: str):
     }
     response = requests.post(url, data=payload)
     return response.json()
+
+def expected_slippage_bps(bar, notional_Q, params):
+    mid   = 0.5 * (bar['High'] + bar['Low'])
+    Vdol  = bar['Close'] * bar['Volume'] + 1e-12
+    sigma = (bar['High'] - bar['Low']) / max(mid, 1e-12)
+
+    # Spread baseline (crossing); maker_prob in [0,1]
+    spr_proxy = params.c_spr * sigma
+    spr_baseline = (params.taker_prob) * spr_proxy  # 0 if pure maker
+
+    # Participation rate
+    phi = min(1.0, notional_Q / Vdol)
+
+    # Square-root impact
+    impact_bps = 1e4 * params.Y * sigma * (phi ** 0.5)
+
+    # Liquidity scalers
+    illiq = abs(bar['Return']) / Vdol
+    S = (1.0 + params.a * (illiq ** params.beta))
+
+    # Optional: volume percentile & time-of-day adjustments
+    # S *= (1.0 + params.b * max(0.0, bar['VolPctMedian'] - 1.0))
+    # S *= (1.0 + params.d * bar['TODPenalty'])
+
+    return spr_baseline + impact_bps * S

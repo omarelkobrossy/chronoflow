@@ -14,11 +14,12 @@ import time
 import threading
 from json import dumps
 from coinbase.rest import RESTClient
+from utils import send_telegram_message
 
 # Add the Quant directory to the path to import from GatherData.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Quant'))
 from GatherData import calculate_technical_indicators
-from utils import preprocess_data, calculate_feature_importance
+from utils import preprocess_data, calculate_feature_importance, make_ref_bins, psi_from_bins
 
 class CoinbaseAPIClient:
     def __init__(self, api_key=None, api_secret=None, symbol='XRP-USD', years_of_data=2):
@@ -48,43 +49,60 @@ class CoinbaseAPIClient:
         # Incremental statistics for expanding standardization
         self.running_stats = {}  # Will store {feature: {'sum': x, 'sum_sq': x, 'count': n}}
         self.last_processed_timestamp = None
-        self.window_size = 35697
-        self.retrain_interval = 31248  # Number of 15-minute intervals between retrains (15 * 15 = 225 minutes)
-        self.last_retrain_idx = 0
-        self.last_retrain_time = None
-        self.last_update_time = None
         self.trading_params = {
-            'min_risk_percentage': 0.10621436917144346,
-            'max_risk_percentage': 0.7406474089001399,
-            'risk_scaling_factor': 1.9826763047012028,#1.7429109176364634,#1.6949727011806939,
-            'risk_reward_ratio': 1.606483572993909,#1.6037213842177254,
-            'min_predicted_move': 0.008781131561703973,#0.005113433706915217,
-            'partial_take_profit': 0.73356304921584,
-            'min_holding_period': 13,
-            'aggressiveness': 3.60283903237039,
-            'max_holding_period': 79,
-            'max_concurrent_trades': 9,
-            'stop_loss_atr_multiplier': 2.1396518439272034,
-            'atr_predicted_weight': 0.7439320797469477,
-            'feature_top_k': 23,
+            "min_risk_percentage": 0.18667545873693023,
+            "max_risk_percentage": 0.7333546909470524,
+            "risk_scaling_factor": 2.5184557369439187,
+            "risk_reward_ratio": 1.5264918456689758,
+            "min_predicted_move": 0.007964038055791422,
+            "partial_take_profit": 0.7091585844137864,
+            "min_holding_period": 14,
+            "max_holding_period": 81,
+            "max_concurrent_trades": 8,
+            "stop_loss_atr_multiplier": 3.9267721668435853,
+            "atr_predicted_weight": 0.6210460131734021,
+            "aggressiveness": 1.933354082966644,
+            "feature_count_k": 35,
+            "window_size": 34257,
         }
+        self.window_size = self.trading_params['window_size']
+        self.last_update_time = None
+        
+        # PSI-based drift detection parameters
+        self.psi_params = {
+            "psi_bins": 20,
+            "psi_feat_count": self.trading_params['feature_count_k'],
+            "psi_check_step": 1,  # Check every 1 bars
+            "psi_window": self.window_size,  # Same as window_size
+            "psi_threshold_hi": 0.25,  # Strong drift threshold
+            "psi_threshold_lo": 0.12,  # Mild drift threshold
+            "psi_cooldown": 50,  # Min bars between retrains
+            "min_segment": 300,  # Minimum segment size
+        }
+        
+        # PSI reference data
+        self.psi_ref_data = None
+        self.psi_ref_bins = {}
+        self.last_retrain_bar = None
+        self.segment_start = None
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
         self.model_params = {
-            "learning_rate": 0.0394442779972318,
-            "n_estimators": 1083,
-            "max_depth": 3,
-            "max_leaves": 36,
-            "min_child_weight": 0.6502554198756915,
-            "gamma": 0.24978545049426548,
-            "subsample": 0.7744787259506858,
-            "colsample_bytree": 0.40844599213496485,
-            "colsample_bylevel": 0.710999807370531,
-            "reg_lambda": 0.5670409126584627,
-            "reg_alpha": 0.5543215207345554,
-            "max_bin": 659,
+            "learning_rate": 0.04124763223591977,
+            "n_estimators": 1268,
+            "max_depth": 5,
+            "max_leaves": 51,
+            "min_child_weight": 0.7487494959921415,
+            "gamma": 0.217123826259615,
+            "subsample": 0.6064938340420224,
+            "colsample_bytree": 0.5213054854581245,
+            "colsample_bylevel": 0.7647516429830787,
+            "reg_lambda": 1.9815198277316892,
+            "reg_alpha": 6.133298215314081e-05,
+            "max_bin": 256,
             'random_state': 42,
             'tree_method': 'hist',
+            'device': 'cuda',
         }
         
         if api_key and api_secret:
@@ -361,7 +379,7 @@ class CoinbaseAPIClient:
             iterations=1,
             save_importance=False,
             visualize_importance=False,
-            K=self.trading_params['feature_top_k']
+            K=self.trading_params['feature_count_k']
         )
         
         # Initialize running statistics from the in-memory dataset
@@ -425,19 +443,30 @@ class CoinbaseAPIClient:
             # Train model
             self.model.fit(X_initial, y_initial)
             
+            # Initialize PSI reference data from the training window
+            print("Initializing PSI reference data...")
+            training_window_data = df_processed.iloc[training_start_idx:].copy()
+            self.psi_ref_data = training_window_data[self.current_features]
+            self.psi_ref_bins = {}
+            for feature in self.current_features:
+                if feature in self.psi_ref_data.columns:
+                    self.psi_ref_bins[feature] = make_ref_bins(
+                        self.psi_ref_data[feature].values, 
+                        bins=self.psi_params['psi_bins']
+                    )
+            
+            # Initialize PSI tracking variables
+            self.last_retrain_bar = len(df_processed) - 1
+            self.segment_start = len(df_processed) - 1
+            
+            print(f"PSI reference data initialized with {len(self.psi_ref_data)} samples")
+            
             # Log training sanity check
             self.sanity_log(self.model, X_initial[-1:], tag="INIT_TRAIN")
         print("Model initialized successfully")
         
     def update_model(self, df=None):
-        """Update the model with new data"""
-        # Check if it's time to retrain
-        if not self.should_retrain_model():
-            return
-            
-        retrain_minutes = self.retrain_interval * 15
-        print(f"\nRetraining model at {datetime.now().strftime('%H:%M:%S')} (every {retrain_minutes} minutes)...")
-        
+        """Update the model with new data based on PSI drift detection"""
         # Use the full in-memory historical data (already has technical indicators)
         if df is None:
             if self.historical_data.empty:
@@ -445,30 +474,34 @@ class CoinbaseAPIClient:
                 return
             df = self.historical_data.copy()
         
-        if len(df) < self.window_size:
-            print(f"Insufficient data for model retraining: {len(df)} < {self.window_size}")
+        # Check for PSI drift
+        current_data_length = len(df)
+        if not self.check_psi_drift(current_data_length):
+            return
+        
+        print(f"\nRetraining model at {datetime.now().strftime('%H:%M:%S')} due to PSI drift detection...")
+        
+        if current_data_length < self.window_size:
+            print(f"Insufficient data for model retraining: {current_data_length} < {self.window_size}")
             return
             
-        print(f"Using {len(df):,} bars from full historical dataset for retraining")
+        print(f"Using {current_data_length:,} bars from full historical dataset for retraining")
         
         # Data already has technical indicators calculated, just preprocess
-        
-        # Preprocess data using the utility function
         df_processed, feature_cols, target_cols = preprocess_data(df)
         
-        # Recalculate feature importance if needed
-        if len(df) % self.window_size == 0:
-            print("Recalculating feature importance...")
-            self.current_features = calculate_feature_importance(
-                df_processed,
-                feature_cols,
-                target_cols,
-                model_params=self.model_params,
-                iterations=1,
-                save_importance=False,
-                visualize_importance=False,
-                K=self.trading_params['feature_top_k']
-            )
+        # Recalculate feature importance
+        print("Recalculating feature importance...")
+        self.current_features = calculate_feature_importance(
+            df_processed,
+            feature_cols,
+            target_cols,
+            model_params=self.model_params,
+            iterations=1,
+            save_importance=False,
+            visualize_importance=False,
+            K=self.trading_params['feature_count_k']
+        )
         
         # Get preprocessed features and target using incremental standardization
         X = []
@@ -478,7 +511,6 @@ class CoinbaseAPIClient:
         temp_running_stats = {col: self.running_stats[col].copy() for col in self.current_features if col in self.running_stats}
         
         # Use only the most recent window_size bars for retraining (but with full context for indicators)
-        # The buffer bars provided context for technical indicators, now we retrain on the recent window
         training_start_idx = max(0, len(df_processed) - self.window_size)
         training_df = df_processed.iloc[training_start_idx:].copy()
         
@@ -486,7 +518,6 @@ class CoinbaseAPIClient:
         print(f"Full context: {len(df_processed)} bars (buffer provided proper indicator calculation)")
         
         # Process each row sequentially to build training data with incremental standardization
-        # Start from beginning of full dataset to maintain proper running stats, but only save recent window for training
         for i in range(len(df_processed)):
             row = df_processed.iloc[i]
             row_features = {col: row[col] for col in self.current_features if col in df_processed.columns}
@@ -514,8 +545,25 @@ class CoinbaseAPIClient:
             # Update model
             self.model.fit(X, y)
             
+            # Update PSI reference data with new training window
+            print("Updating PSI reference data...")
+            self.psi_ref_data = training_df[self.current_features]
+            self.psi_ref_bins = {}
+            for feature in self.current_features:
+                if feature in self.psi_ref_data.columns:
+                    self.psi_ref_bins[feature] = make_ref_bins(
+                        self.psi_ref_data[feature].values, 
+                        bins=self.psi_params['psi_bins']
+                    )
+            
+            # Update PSI tracking variables
+            self.last_retrain_bar = current_data_length - 1
+            self.segment_start = current_data_length - 1
+            
+            print(f"PSI reference data updated with {len(self.psi_ref_data)} samples")
+            
             # Log retraining sanity check
-            self.sanity_log(self.model, X[-1:], tag="RETRAIN")
+            self.sanity_log(self.model, X[-1:], tag="PSI_RETRAIN")
         print("Model updated successfully")
         
     def predict_next_bar(self, df=None):
@@ -575,25 +623,68 @@ class CoinbaseAPIClient:
         prediction = self.model.predict(X_pred)[0]
         return prediction
     
-    def should_retrain_model(self):
-        """Check if it's time to retrain the model based on retrain_interval * 15 minutes"""
-        now = datetime.now()
+    def check_psi_drift(self, current_data_length):
+        """Check for PSI drift and determine if model should be retrained"""
+        if self.psi_ref_data is None or len(self.psi_ref_bins) == 0:
+            return False
         
-        # If this is the first time, retrain immediately
-        if self.last_retrain_time is None:
-            self.last_retrain_time = now
-            return True
+        # Check if we have enough data for PSI calculation
+        if current_data_length < self.psi_params['psi_window']:
+            return False
         
-        # Calculate minutes since last retrain
-        minutes_since_last = (now - self.last_retrain_time).total_seconds() / 60
+        # Check if enough time has passed since last retrain
+        if self.last_retrain_bar is not None:
+            bars_since_last_retrain = current_data_length - self.last_retrain_bar
+            if bars_since_last_retrain < self.psi_params['psi_cooldown']:
+                return False
         
-        # Retrain every retrain_interval * 15 minutes
-        retrain_minutes = self.retrain_interval * 15
-        if minutes_since_last >= retrain_minutes:
-            self.last_retrain_time = now
-            return True
+        # Check if we have a minimum segment size
+        if self.segment_start is not None:
+            current_segment_size = current_data_length - self.segment_start
+            if current_segment_size < self.psi_params['min_segment']:
+                return False
         
-        return False
+        # Check if it's time for a PSI check (every psi_check_step bars)
+        if self.segment_start is not None:
+            bars_since_segment_start = current_data_length - self.segment_start
+            if bars_since_segment_start % self.psi_params['psi_check_step'] != 0:
+                return False
+        
+        # Calculate PSI for current window
+        try:
+            # Get current window data
+            current_window_start = current_data_length - self.psi_params['psi_window']
+            current_window_data = self.historical_data.iloc[current_window_start:current_data_length]
+            
+            # Preprocess current window
+            current_processed, _, _ = preprocess_data(current_window_data)
+            
+            # Calculate PSI for each feature
+            max_psi = 0.0
+            for feature in self.current_features:
+                if feature in self.psi_ref_bins and feature in current_processed.columns:
+                    psi_value = psi_from_bins(
+                        self.psi_ref_data[feature].values,
+                        current_processed[feature].values,
+                        self.psi_ref_bins[feature]
+                    )
+                    max_psi = max(max_psi, psi_value)
+            
+            print(f"PSI check: max_psi = {max_psi:.4f}")
+            
+            # Check if drift exceeds threshold
+            if max_psi > self.psi_params['psi_threshold_hi']:
+                print(f"Strong drift detected (PSI={max_psi:.4f} > {self.psi_params['psi_threshold_hi']})")
+                return True
+            elif max_psi > self.psi_params['psi_threshold_lo']:
+                print(f"Mild drift detected (PSI={max_psi:.4f} > {self.psi_params['psi_threshold_lo']})")
+                # Continue monitoring but note mild drift
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error in PSI drift check: {e}")
+            return False
     
     def should_update_data(self):
         """Check if it's time to pull new data and make predictions (every 15 minutes on the clock)"""
@@ -621,11 +712,12 @@ class CoinbaseAPIClient:
         if open_trades_count >= self.trading_params['max_concurrent_trades']:
             print(f"Maximum concurrent trades reached ({open_trades_count}/{self.trading_params['max_concurrent_trades']})")
             return
+        #prediction = -abs(prediction * 10)
         print(f"Prediction: {prediction}, Min Predicted Move: {-self.trading_params['min_predicted_move']}")
         if prediction < -self.trading_params['min_predicted_move']:
             entry_price = current_price
             
-            predicted_move = abs(prediction)#*3
+            predicted_move = abs(prediction)
             
             # Calculate how much the predicted move exceeds the minimum threshold
             move_excess_ratio = (predicted_move - self.trading_params['min_predicted_move']) / self.trading_params['min_predicted_move']
@@ -735,6 +827,21 @@ class CoinbaseAPIClient:
                 print(f"  Take Profit: ${rounded_take_profit:.4f}")
                 print(f"  Size: {size:.2f}")
                 print(f"  Order ID: {buy_order_id} (added to monitoring)")
+
+                send_telegram_message(f"""
+                >> TRADE OPENED <<
+                Entry Time: {datetime.now()}
+                Size: {size:.4f}
+                Entry / Entry Size: ${P_in:.4f} / {size*P_in:.2f}
+                Stop Trigger / SL Size: ${rounded_stop_loss:.4f} / {size*rounded_stop_loss:.2f}
+                Take Profit / TP Size: ${rounded_take_profit:.4f} / {size*rounded_take_profit:.2f}
+                Order ID: {buy_order_id}
+                Risk: {risk_percentage*100:.2f}%
+                Profit %: {(P_tp - P_in) / P_in:.2f}%
+                Profit Value: {(P_tp - P_in) * size:.2f}
+                Predicted Move: {predicted_move:.2f}%
+                Break Even: ${P_be_tp:.4f}
+                """)
                 
                 # Update capital from account after placing trade
                 time.sleep(2)  # Wait for orders to process
@@ -1351,6 +1458,12 @@ class CoinbaseAPIClient:
             # Update last processed timestamp
             self.last_processed_timestamp = self.raw_data['Date'].max()
             
+            # Initialize PSI tracking variables if not set
+            if self.last_retrain_bar is None:
+                self.last_retrain_bar = len(self.raw_data) - 1
+            if self.segment_start is None:
+                self.segment_start = len(self.raw_data) - 1
+            
             latest_close = new_candles['Close'].iloc[-1]
             print(f"✅ Added {len(new_candles)} new candles to memory")
             print(f"   Latest: {self.last_processed_timestamp} - Close: ${latest_close:.4f}")
@@ -1386,7 +1499,8 @@ class CoinbaseAPIClient:
         
         print("\nLive trading started. Press Ctrl+C to stop.")
         print(f"Data updates: Every 15 minutes")
-        print(f"Model retraining: Every {self.retrain_interval * 15} minutes")
+        print(f"Model retraining: PSI-based drift detection")
+        print(f"PSI parameters: check_step={self.psi_params['psi_check_step']}, threshold_hi={self.psi_params['psi_threshold_hi']}")
         
         try:
             while True:

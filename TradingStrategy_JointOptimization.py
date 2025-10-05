@@ -7,7 +7,7 @@ from datetime import datetime
 import optuna
 import json
 import math
-from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score, sanitize_features, standardize_expanding, standardize_expanding_train, make_ref_bins, psi_from_bins
+from utils import preprocess_data, calculate_feature_importance, clamp, calculate_sharpe_ratio, calculate_max_drawdown, calculate_distribution_metrics, calculate_cagr, calculate_mar, calculate_composite_score, sanitize_features, standardize_expanding, standardize_expanding_train, make_ref_bins, psi_from_bins, analyze_confidence_vs_success
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 from Optimization.FAPT_Wasserstein import predict_optimal_parameters, get_top_market_weather_features
@@ -45,7 +45,7 @@ H_default = {
     "colsample_bylevel": 0.7647516429830787,
     "reg_lambda": 1.9815198277316892,
     "reg_alpha": 6.133298215314081e-05,
-    "max_bin": 874,
+    "max_bin": 256,
     'random_state': 42,
     'tree_method': 'hist',
     'device': 'cuda',
@@ -716,7 +716,6 @@ def save_top_parameters(study, symbol):
             'colsample_bylevel': params['colsample_bylevel'],
             'reg_lambda': params['reg_lambda'],
             'reg_alpha': params['reg_alpha'],
-            'max_bin': params['max_bin']
         }
         
         # Get the equity curve from trial attributes and convert back to Series
@@ -826,7 +825,7 @@ def objective(trial):
         'colsample_bylevel': trial.suggest_float("colsample_bylevel", 0.5, 1.0),
         'reg_lambda': trial.suggest_float("reg_lambda", 0.5, 5.0, log=True),
         'reg_alpha': trial.suggest_float("reg_alpha", 0.0, 2.0),
-        'max_bin': trial.suggest_int("max_bin", 256, 1024),
+        'max_bin': 256,
         'random_state': 42,
         'tree_method': 'hist',
         'device': 'cuda'
@@ -894,7 +893,6 @@ def objective(trial):
     save_top_parameters(study, symbol)
     
     return composite_score
-
 
 if __name__ == "__main__":
     # Load and prepare data
@@ -1079,7 +1077,6 @@ if __name__ == "__main__":
             'colsample_bylevel': best_params['colsample_bylevel'],
             'reg_lambda': best_params['reg_lambda'],
             'reg_alpha': best_params['reg_alpha'],
-            'max_bin': best_params['max_bin'],
             'random_state': 42,
             'tree_method': 'hist',
             'device': 'cuda'
@@ -1127,7 +1124,6 @@ if __name__ == "__main__":
             'colsample_bylevel': best_params['colsample_bylevel'],
             'reg_lambda': best_params['reg_lambda'],
             'reg_alpha': best_params['reg_alpha'],
-            'max_bin': best_params['max_bin'],
             # Performance metrics
             'total_return': best_metrics['total_return'],
             'final_capital': best_metrics['final_capital'],
@@ -1174,7 +1170,6 @@ if __name__ == "__main__":
     print(f"Colsample by Level: {best_params['colsample_bylevel']:.3f}")
     print(f"Reg Lambda: {best_params['reg_lambda']:.3f}")
     print(f"Reg Alpha: {best_params['reg_alpha']:.3f}")
-    print(f"Max Bin: {best_params['max_bin']}")
     print(f"\nPerformance Metrics:")
     print(f"Total Return: {best_params['total_return']:.2f}%")
     print(f"Final Capital: ${best_params['final_capital']:,.2f}")
@@ -1185,6 +1180,10 @@ if __name__ == "__main__":
     print(f"MAR: {best_params['mar']:.2f}")
     print(f"Trade Count: {best_params['trade_count']}")
     print(f"Composite Score: {best_params['composite_score']:.2f}")
+
+    # Analyze confidence vs success relationship
+    # if len(best_params['trade_history']) > 0:
+    #     analyze_confidence_vs_success(best_params['trade_history'], symbol)
 
     # Plot best equity curve
     # Adjust figure size based on number of phases
