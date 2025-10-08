@@ -11,6 +11,7 @@ from scipy import stats
 from math import exp
 from sklearn.preprocessing import LabelEncoder
 import numba as nb
+import math
 
 
 # Load the data
@@ -863,3 +864,35 @@ def expected_slippage_bps(bar, notional_Q, params):
     # S *= (1.0 + params.d * bar['TODPenalty'])
 
     return spr_baseline + impact_bps * S
+
+
+# Binance order formatting helper functions
+def get_filters(client, symbol):
+    """Get trading filters for a symbol from Binance API"""
+    info = client.exchange_info(symbol=symbol)
+    sym = info["symbols"][0]
+    f = {d["filterType"]: d for d in sym["filters"]}
+    tick = float(f["PRICE_FILTER"]["tickSize"])
+    step = float(f["LOT_SIZE"]["stepSize"])
+    min_notional = float(f.get("MIN_NOTIONAL", {}).get("minNotional", 0))
+    return tick, step, min_notional
+
+
+def fmt_qty(qty, step):
+    """Format quantity according to LOT_SIZE step size"""
+    prec = max(0, int(round(-math.log10(step))))
+    q = math.floor(qty * (10**prec)) / (10**prec)
+    return f"{q:.{prec}f}".rstrip("0").rstrip(".")
+
+
+def fmt_price(p, tick):
+    """Format price according to PRICE_FILTER tick size"""
+    prec = max(0, int(round(-math.log10(tick))))
+    pr = round(p, prec)
+    # Limit-maker must be on a valid tick
+    return f"{pr:.{prec}f}".rstrip("0").rstrip(".")
+
+def floor_to_step(x, step):
+    import math
+    prec = max(0, int(round(-math.log10(step))))
+    return math.floor(x * (10**prec)) / (10**prec)

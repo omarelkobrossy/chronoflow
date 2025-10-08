@@ -14,9 +14,10 @@ import time
 import threading
 import websocket
 import ssl
-from binance.client import Client
-from binance import ThreadedWebsocketManager
-from utils import send_telegram_message
+from binance.spot import Spot
+from binance.websocket.spot.websocket_api import SpotWebsocketAPIClient
+from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
+from utils import send_telegram_message, get_filters, fmt_qty, fmt_price, floor_to_step
 
 # Add the Quant directory to the path to import from GatherData.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Quant'))
@@ -24,7 +25,7 @@ from GatherData import calculate_technical_indicators
 from utils import preprocess_data, calculate_feature_importance, make_ref_bins, psi_from_bins
 
 class BinanceAPIClient:
-    def __init__(self, api_key=None, api_secret=None, symbol='XRPUSDC', years_of_data=2):
+    def __init__(self, api_key=None, api_secret=None, symbol='XRP/USDC', years_of_data=2):
         """
         Initialize Binance API client using WebSocket streams
         
@@ -36,10 +37,12 @@ class BinanceAPIClient:
         """
         self.api_key = api_key
         self.api_secret = api_secret
-        self.symbol = symbol
+        self.symbol = symbol.replace('/', '')
+        self.symbol_base, self.symbol_quote = symbol.split('/')
         self.years_of_data = years_of_data
         self.client = None
-        self.bm = None  # ThreadedWebsocketManager
+        self.ws_stream_client = None  # SpotWebsocketStreamClient
+        self.ws_api_client = None  # SpotWebsocketAPIClient
         self.model = None
         self.current_features = None
         self.maker_fee = 0.001  # Will be updated from API
@@ -108,17 +111,29 @@ class BinanceAPIClient:
         }
         
         # WebSocket stream management
-        self.ws_connections = {}
         self.stream_active = False
         self.last_kline_data = None
         self.kline_lock = threading.Lock()
         
+        # Symbol info cache for lot size validation
+        self.symbol_info = None
+        
+        # Account info cache
+        self.account_info = None
+        
         if api_key and api_secret:
-            self.client = Client(api_key=api_key, api_secret=api_secret)
-            self.bm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
-            self.bm.start()
+            self.client = Spot(api_key=api_key, api_secret=api_secret)
+            # Initialize WebSocket clients
+            self.ws_stream_client = None  # Will be created when starting stream
+            self.ws_api_client = SpotWebsocketAPIClient(api_key=api_key, api_secret=api_secret)
             # Fetch actual trading fees from API
             self.fetch_trading_fees()
+            
+            # Load symbol info for lot size validation
+            self.load_symbol_info()
+            
+            # Load account info
+            self.account_info = self.get_account_info()
     
     def fetch_trading_fees(self):
         """Fetch actual trading fees from Binance API"""
@@ -130,14 +145,13 @@ class BinanceAPIClient:
             print("Fetching trading fees from Binance API...")
             
             # Get trading fees for the specific symbol
-            fee_info = self.client.get_trade_fee(symbol=self.symbol)
+            fee_info = self.client.trade_fee(symbol=self.symbol)
             
-            if fee_info and len(fee_info) > 0:
-                # Extract maker and taker fees from the first (and only) result
+            if fee_info:
+                # Extract maker and taker fees from the response
                 print(fee_info)
-                fee_data = fee_info[0]
-                self.maker_fee = float(fee_data['makerCommission']) / 10000  # Convert from basis points to decimal
-                self.taker_fee = float(fee_data['takerCommission']) / 10000  # Convert from basis points to decimal
+                self.maker_fee = float(fee_info['makerCommission'])
+                self.taker_fee = float(fee_info['takerCommission'])
                 
                 print(f"[OK] Trading fees fetched:")
                 print(f"   Maker fee: {self.maker_fee:.4f} ({self.maker_fee*100:.2f}%)")
@@ -154,21 +168,66 @@ class BinanceAPIClient:
             print(f"   Taker fee: {self.taker_fee:.4f} ({self.taker_fee*100:.2f}%)")
             print("Note: Fee fetching requires valid API credentials")
     
+    def load_symbol_info(self):
+        """Load and cache symbol info for lot size validation"""
+        try:
+            if not self.client:
+                print("No authenticated client available for fetching symbol info")
+                return
+            
+            print(f"Loading symbol info for {self.symbol}...")
+            
+            # Get exchange info
+            exchange_info = self.client.exchange_info()
+            
+            # Find our symbol
+            for symbol_info in exchange_info['symbols']:
+                if symbol_info['symbol'] == self.symbol:
+                    self.symbol_info = symbol_info
+                    print(f"✅ Symbol info loaded for {self.symbol}")
+                    
+                    # Print lot size requirements
+                    lot_size_filter = None
+                    for filter_info in symbol_info['filters']:
+                        if filter_info['filterType'] == 'LOT_SIZE':
+                            lot_size_filter = filter_info
+                            break
+                    
+                    if lot_size_filter:
+                        min_qty = float(lot_size_filter['minQty'])
+                        max_qty = float(lot_size_filter['maxQty'])
+                        step_size = float(lot_size_filter['stepSize'])
+                        print(f"   Min quantity: {min_qty}")
+                        print(f"   Max quantity: {max_qty}")
+                        print(f"   Step size: {step_size}")
+                    else:
+                        print("   No LOT_SIZE filter found")
+                    
+                    return
+            
+            print(f"❌ Symbol {self.symbol} not found in exchange info")
+            
+        except Exception as e:
+            print(f"❌ Error loading symbol info: {e}")
+    
     def start_kline_stream(self):
         """Start WebSocket kline stream for real-time data"""
         try:
             print(f"Starting kline stream for {self.symbol}...")
             
             # Start kline stream (15-minute intervals)
-            self.ws_connections['kline'] = self.bm.start_kline_socket(
-                callback=self.handle_kline_message,
-                symbol=self.symbol,
-                interval=Client.KLINE_INTERVAL_15MINUTE
+            def message_handler(ws, message):
+                self.handle_kline_message(message)
+            
+            # Use the correct method signature for binance-connector
+            self.ws_stream_client = SpotWebsocketStreamClient(on_message=message_handler)
+            self.ws_stream_client.kline(
+                symbol=self.symbol.lower(),
+                interval='15m'
             )
             
             self.stream_active = True
             print(f"✅ Kline stream started for {self.symbol}")
-            print(f"[WEBSOCKET] Stream connection ID: {self.ws_connections['kline']}")
             print(f"[WEBSOCKET] Stream active status: {self.stream_active}")
             
         except Exception as e:
@@ -182,6 +241,15 @@ class BinanceAPIClient:
             # print(f"[WEBSOCKET] Received message at {datetime.now().strftime('%H:%M:%S')}")
             
             with self.kline_lock:
+                # Parse JSON message if it's a string
+                if isinstance(msg, str):
+                    import json
+                    msg = json.loads(msg)
+                
+                # Skip non-kline messages (like ping/pong)
+                if 'k' not in msg:
+                    return
+                
                 # Extract kline data
                 kline = msg['k']
                 
@@ -211,6 +279,7 @@ class BinanceAPIClient:
                     
         except Exception as e:
             print(f"❌ Error handling kline message: {e}")
+            print(msg)
     
     def process_new_candle(self, kline_data):
         """Process a new closed candle and update model/predictions"""
@@ -260,9 +329,8 @@ class BinanceAPIClient:
     def stop_kline_stream(self):
         """Stop WebSocket kline stream"""
         try:
-            if 'kline' in self.ws_connections:
-                self.bm.stop_socket(self.ws_connections['kline'])
-                del self.ws_connections['kline']
+            if self.ws_stream_client:
+                self.ws_stream_client.stop()
             
             self.stream_active = False
             print("✅ Kline stream stopped")
@@ -277,12 +345,17 @@ class BinanceAPIClient:
                 print("No authenticated client available")
                 return None
             
-            account_info = self.client.get_account()
+            account_info = self.client.account()
             return account_info
             
         except Exception as e:
             print(f"Error fetching account info: {e}")
             return None
+    
+    def refresh_account_info(self):
+        """Refresh account info cache"""
+        self.account_info = self.get_account_info()
+        return self.account_info
     
     def get_usd_balance(self):
         """Get USDC balance from account"""
@@ -405,7 +478,7 @@ class BinanceAPIClient:
             return
         
         print(f"Prediction: {prediction}, Min Predicted Move: {-self.trading_params['min_predicted_move']}")
-        if prediction < -self.trading_params['min_predicted_move']:
+        if prediction < -self.trading_params['min_predicted_move'] or True:
             entry_price = current_price
             
             predicted_move = abs(prediction)
@@ -458,29 +531,111 @@ class BinanceAPIClient:
             
             if quantity <= 0:
                 return
+            
+            # Get trading filters and format quantities/prices
+            try:
+                tick_size, step_size, min_notional = get_filters(self.client, self.symbol)
+                
+                print(f"Symbol {self.symbol} trading filters:")
+                print(f"  Tick size: {tick_size}")
+                print(f"  Step size: {step_size}")
+                print(f"  Min notional: {min_notional}")
+                print(f"  Calculated quantity: {quantity}")
+                
+                # Format quantity according to LOT_SIZE step
+                quantity_str = fmt_qty(quantity, step_size)
+                quantity = float(quantity_str)
+                
+                # Format prices according to PRICE_FILTER tick
+                entry_price_str = fmt_price(entry_price, tick_size)
+                P_tp_str = fmt_price(P_tp, tick_size)
+                P_sl_str = fmt_price(P_sl, tick_size)
+                
+                print(f"Formatted quantities and prices:")
+                print(f"  Quantity: {quantity_str}")
+                print(f"  Entry price: {entry_price_str}")
+                print(f"  Take profit: {P_tp_str}")
+                print(f"  Stop loss: {P_sl_str}")
+                
+                # Validate minimum notional
+                notional_value = quantity * entry_price
+                if min_notional > 0 and notional_value < min_notional:
+                    print(f"❌ Notional value {notional_value} below minimum {min_notional}")
+                    print(f"   Required minimum quantity: {min_notional / entry_price:.6f}")
+                    return
+                
+                print(f"✅ Order validation passed - Notional: {notional_value}")
+                
+            except Exception as e:
+                print(f"❌ Error getting trading filters: {e}")
+                print("Proceeding with unformatted values...")
+                # Fallback to basic validation
+                if quantity <= 0:
+                    return
+                # Use unformatted values as fallback
+                quantity_str = str(quantity)
+                entry_price_str = str(entry_price)
+                P_tp_str = str(P_tp)
+                P_sl_str = str(P_sl)
                 
             # Place the order using Binance API with OCO bracket
             try:
                 # 1) Enter position with market buy
-                buy_order = self.client.order_market_buy(
+                buy_order = self.client.new_order(
                     symbol=self.symbol,
-                    quantity=quantity
+                    side='BUY',
+                    type='MARKET',
+                    quantity=quantity_str
                 )
                 
                 print(f"Market buy order placed: {buy_order}")
+
+                executed = float(buy_order['executedQty'])
+                
+                # Calculate BNB commission paid (since BNB is used for fees)
+                commission_bnb = sum(
+                    float(o['commission']) for o in buy_order['fills']
+                    if o['commissionAsset'] == 'BNB'
+                )
+                
+                # Refresh account info to get current balances
+                self.refresh_account_info()
+                if not self.account_info:
+                    print("❌ Failed to refresh account info")
+                    return
+
+                # Get current free balance
+                free_asset = next(float(a['free']) for a in self.account_info['balances'] if a['asset'] == self.symbol_base)
+
+                # Since BNB is used for fees, we can sell the full executed quantity
+                sell_qty = floor_to_step(executed, step_size)
                 
                 # 2) Immediately attach OCO bracket order
-                oco_order = self.client.create_oco_order(
+                oco_order = self.client.new_oco_order(
                     symbol=self.symbol,
                     side='SELL',
-                    quantity=quantity,
-                    price=P_tp,  # Take profit price
-                    stopPrice=P_sl,  # Stop loss trigger price
-                    stopLimitPrice=P_sl,  # Stop loss limit price
-                    stopLimitTimeInForce='GTC'
+                    quantity=sell_qty,
+
+                    # ABOVE leg = take-profit limit (must be LIMIT_MAKER)
+                    aboveType='LIMIT_MAKER',  # Type for take profit order
+                    abovePrice=P_tp_str,  # Take profit price
+
+                    # BELOW leg = stop (choose STOP_LOSS or STOP_LOSS_LIMIT)
+                    belowType='STOP_LOSS',  # Type for stop loss order
+                    belowStopPrice=P_sl_str,  # Stop loss trigger price
+
+                    newOrderRespType='RESULT'  # Response type for the new order
                 )
                 
                 print(f"OCO bracket order placed: {oco_order}")
+                
+                # Send success message
+                print(f"✅ Trade successfully opened!")
+                print(f"   Buy Order ID: {buy_order['orderId']}")
+                print(f"   OCO Order List ID: {oco_order.get('orderListId', 'N/A')}")
+                print(f"   Executed Quantity: {executed:.6f} {self.symbol_base}")
+                print(f"   Sell Quantity: {sell_qty:.6f} {self.symbol_base}")
+                print(f"   Commission Paid: {commission_bnb:.6f} BNB")
                 
                 # Store trade info for logging
                 trade_info = {
@@ -502,19 +657,52 @@ class BinanceAPIClient:
                 print(f"  Quantity: {quantity:.6f}")
                 print(f"  Risk: {risk_percentage*100:.2f}%")
 
+                # Calculate BNB fees paid (since BNB is used for fee structure)
+                total_commission_bnb = sum(
+                    float(fill['commission']) for fill in buy_order['fills']
+                    if fill['commissionAsset'] == 'BNB'
+                )
+                
+                # Calculate expected profit based on actual executed quantity
+                expected_profit_usd = (float(P_tp_str) - float(entry_price_str)) * sell_qty
+                expected_profit_pct = ((float(P_tp_str) - float(entry_price_str)) / float(entry_price_str)) * 100
+                
+                # Calculate expected loss if stop loss hits
+                expected_loss_usd = (float(entry_price_str) - float(P_sl_str)) * sell_qty
+                expected_loss_pct = ((float(entry_price_str) - float(P_sl_str)) / float(entry_price_str)) * 100
+
                 send_telegram_message(f"""
                 >> TRADE OPENED WITH OCO BRACKET <<
                 Entry Time: {datetime.now()}
-                Quantity: {quantity:.6f}
-                Entry / Entry Size: ${P_in:.4f} / {quantity*P_in:.2f}
-                Stop Loss / SL Size: ${P_sl:.4f} / {quantity*P_sl:.2f}
-                Take Profit / TP Size: ${P_tp:.4f} / {quantity*P_tp:.2f}
-                Risk: {risk_percentage*100:.2f}%
-                Profit %: {(P_tp - P_in) / P_in:.2f}%
-                Profit Value: {(P_tp - P_in) * quantity:.2f}
-                Predicted Move: {predicted_move:.2f}%
-                Break Even: ${P_be_tp:.4f}
-                Order Type: OCO Bracket
+
+                📊 ORDER DETAILS:
+                • Symbol: {self.symbol}
+                • Side: BUY (Market) + SELL (OCO Bracket)
+
+                💰 QUANTITIES & PRICES:
+                • Expected Buy Qty: {quantity_str} {self.symbol_base}
+                • Executed Buy Qty: {executed:.6f} {self.symbol_base}
+                • Commission Paid: {commission_bnb:.6f} BNB
+                • Sell Qty (OCO): {sell_qty:.6f} {self.symbol_base} (full executed qty - BNB fees)
+                • Entry Price: ${entry_price_str}
+                • Take Profit: ${P_tp_str}
+                • Stop Loss: ${P_sl_str}
+
+                💸 FEES & COSTS:
+                • Commission Paid: {commission_bnb:.6f} BNB
+                • Commission Asset: BNB (fee structure)
+
+                📈 PROFIT/LOSS PROJECTIONS:
+                • Expected Profit: ${expected_profit_usd:.2f} ({expected_profit_pct:.2f}%)
+                • Expected Loss: ${expected_loss_usd:.2f} ({expected_loss_pct:.2f}%)
+                • Risk/Reward Ratio: {expected_profit_usd/abs(expected_loss_usd):.2f}:1
+                • Break Even Price: ${P_be_tp:.4f}
+
+                🎯 TRADING PARAMETERS:
+                • Risk Percentage: {risk_percentage*100:.2f}%
+                • Predicted Move: {predicted_move:.6f}%
+                • Order Type: OCO Bracket (LIMIT_MAKER + STOP_LOSS)
+                • Order ID: {buy_order['orderId']}
                 """)
                 
                 # Update capital from account after placing trade
@@ -559,7 +747,7 @@ class BinanceAPIClient:
                         # This is part of an OCO order
                         try:
                             # Get OCO order details to check creation time
-                            oco_details = self.client.get_oco_order(symbol=self.symbol, orderListId=order['orderListId'])
+                            oco_details = self.client.query_oco_order(symbol=self.symbol, orderListId=order['orderListId'])
                             created_time = datetime.fromtimestamp(oco_details['time'] / 1000)
                             holding_period = (datetime.now() - created_time).total_seconds() / 60
                             
@@ -575,7 +763,7 @@ class BinanceAPIClient:
                         # Check if we should cancel it due to max holding period
                         try:
                             # Get order details to check creation time
-                            order_details = self.client.get_order(symbol=self.symbol, orderId=order_id)
+                            order_details = self.client.query_order(symbol=self.symbol, orderId=order_id)
                             created_time = datetime.fromtimestamp(order_details['time'] / 1000)
                             holding_period = (datetime.now() - created_time).total_seconds() / 60
                             
@@ -592,7 +780,7 @@ class BinanceAPIClient:
         """Close a trade by cancelling the order and placing a market sell"""
         try:
             # Get order details first to check if it's part of an OCO order
-            order_details = self.client.get_order(symbol=self.symbol, orderId=order_id)
+            order_details = self.client.query_order(symbol=self.symbol, orderId=order_id)
             quantity = float(order_details['origQty'])
             
             # Check if this is part of an OCO order
@@ -606,8 +794,10 @@ class BinanceAPIClient:
                 print(f"Cancelled order {order_id}")
             
             # Place market sell order
-            sell_order = self.client.order_market_sell(
+            sell_order = self.client.new_order(
                 symbol=self.symbol,
+                side='SELL',
+                type='MARKET',
                 quantity=quantity
             )
             
@@ -661,11 +851,12 @@ class BinanceAPIClient:
                 print(f"  Request {i+1:3d}/{requests_needed}: {current_start.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
                 
                 try:
-                    klines = self.client.get_historical_klines(
-                        self.symbol,
-                        Client.KLINE_INTERVAL_15MINUTE,
-                        current_start.strftime("%d %b %Y %H:%M:%S"),
-                        end_time.strftime("%d %b %Y %H:%M:%S")
+                    klines = self.client.klines(
+                        symbol=self.symbol,
+                        interval='15m',
+                        startTime=int(current_start.timestamp() * 1000),
+                        endTime=int(end_time.timestamp() * 1000),
+                        limit=1000
                     )
                     
                     if klines and len(klines) > 0:
@@ -1502,6 +1693,22 @@ class BinanceAPIClient:
         
         # Initialize model (uses full in-memory dataset)
         self.initialize_model()
+        
+        # Make initial prediction on current bar before starting WebSocket stream
+        print("\nMaking initial prediction on current bar...")
+        initial_prediction = self.predict_next_bar()
+        if initial_prediction is not None:
+            current_price = self.raw_data['Close'].iloc[-1]
+            print(f"Initial prediction: {initial_prediction:.4f} at price ${current_price:.4f}")
+            
+            # Execute trade if conditions are met
+            self.execute_trade(initial_prediction, current_price)
+            
+            # Print initial trading summary
+            open_trades_count = self.get_open_trades_count()
+            print(f"Initial state - Capital: ${self.capital:,.2f}, Open trades: {open_trades_count}")
+        else:
+            print("No initial prediction available")
         
         print("\nLive trading started. Press Ctrl+C to stop.")
         print(f"Data updates: Real-time via WebSocket kline streams")
