@@ -14,10 +14,6 @@ import numba as nb
 import math
 
 
-# Load the data
-symbol = "TSLA"
-input_dataset = f"DB/{symbol}_15min_indicators.csv"
-df = pd.read_csv(input_dataset)
 
 def preprocess_data(df):
     print("\nStarting data preprocessing...")
