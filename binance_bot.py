@@ -478,7 +478,7 @@ class BinanceAPIClient:
             return
         
         print(f"Prediction: {prediction}, Min Predicted Move: {-self.trading_params['min_predicted_move']}")
-        if prediction < -self.trading_params['min_predicted_move'] or True:
+        if prediction < -self.trading_params['min_predicted_move']:
             entry_price = current_price
             
             predicted_move = abs(prediction)
