@@ -12,6 +12,7 @@ from math import exp
 from sklearn.preprocessing import LabelEncoder
 import numba as nb
 import math
+import time
 
 
 
@@ -892,3 +893,89 @@ def floor_to_step(x, step):
     import math
     prec = max(0, int(round(-math.log10(step))))
     return math.floor(x * (10**prec)) / (10**prec)
+
+
+def check_ip_location(max_retries=3, timeout=10):
+    """
+    Check if current IP is from a blocked country (US) with exponential backoff retry
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        timeout: Request timeout in seconds
+    
+    Returns:
+        tuple: (is_allowed, geo_data) where is_allowed is False if IP is from US
+    """
+    blocked_countries = ['US', 'United States']
+    
+    for attempt in range(max_retries + 1):
+        try:
+            # Step 1: Get your public IP
+            ip_response = requests.get("https://api.ipify.org", timeout=timeout)
+            if ip_response.status_code != 200:
+                raise requests.RequestException(f"Failed to get IP: HTTP {ip_response.status_code}")
+            
+            ip = ip_response.text.strip()
+            
+            # Step 2: Query geolocation API with browser-like headers
+            geo_headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+                'Referer': 'https://ipapi.co/',
+                'Origin': 'https://ipapi.co'
+            }
+            geo_response = requests.get(f"https://ipapi.co/{ip}/json/", headers=geo_headers, timeout=timeout)
+            if geo_response.status_code != 200:
+                raise requests.RequestException(f"Failed to get geolocation: HTTP {geo_response.status_code}")
+            
+            geo = geo_response.json()
+            
+            # Check for API errors
+            if geo.get("error"):
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return True, None
+            
+            # Extract location info
+            country_code = geo.get("country", "").upper()
+            country_name = geo.get("country_name", "")
+            
+            # Check if country is in blocked list
+            is_blocked = (country_code in blocked_countries or 
+                         country_name in blocked_countries)
+            
+            if is_blocked:
+                print(f"[IP_CHECK] BLOCKED: IP from {country_name} ({country_code})")
+                return False, geo
+            else:
+                return True, geo
+                
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                time.sleep(wait_time)
+                continue
+            else:
+                return True, None
+                
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                time.sleep(wait_time)
+                continue
+            else:
+                return True, None
+                
+        except Exception as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                time.sleep(wait_time)
+                continue
+            else:
+                return True, None
+    
+    return True, None

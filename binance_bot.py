@@ -7,17 +7,13 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 import sys
 import os
-import uuid
-import joblib
 import xgboost as xgb
 import time
 import threading
-import websocket
-import ssl
 from binance.spot import Spot
 from binance.websocket.spot.websocket_api import SpotWebsocketAPIClient
 from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
-from utils import send_telegram_message, get_filters, fmt_qty, fmt_price, floor_to_step
+from utils import send_telegram_message, get_filters, fmt_qty, fmt_price, floor_to_step, check_ip_location
 
 # Add the Quant directory to the path to import from GatherData.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Quant'))
@@ -114,6 +110,8 @@ class BinanceAPIClient:
         self.stream_active = False
         self.last_kline_data = None
         self.kline_lock = threading.Lock()
+        self.last_message_time = None  # Track last WebSocket message time
+        self.connection_health_check_interval = 60  # Check connection health every 60 seconds
         
         # Symbol info cache for lot size validation
         self.symbol_info = None
@@ -150,8 +148,17 @@ class BinanceAPIClient:
             if fee_info:
                 # Extract maker and taker fees from the response
                 print(fee_info)
-                self.maker_fee = float(fee_info['makerCommission'])
-                self.taker_fee = float(fee_info['takerCommission'])
+                
+                # Handle case where API returns a list instead of a single dict
+                if isinstance(fee_info, list) and len(fee_info) > 0:
+                    # API returned a list, get the first element
+                    fee_data = fee_info[0]
+                else:
+                    # API returned a single dict
+                    fee_data = fee_info
+                
+                self.maker_fee = float(fee_data['makerCommission'])
+                self.taker_fee = float(fee_data['takerCommission'])
                 
                 print(f"[OK] Trading fees fetched:")
                 print(f"   Maker fee: {self.maker_fee:.4f} ({self.maker_fee*100:.2f}%)")
@@ -215,18 +222,58 @@ class BinanceAPIClient:
         try:
             print(f"Starting kline stream for {self.symbol}...")
             
+            # Check IP location before starting stream
+            is_allowed, geo_data = check_ip_location()
+            if not is_allowed:
+                print("[WEBSOCKET] BLOCKED: Stream start blocked due to IP location check")
+                self.stream_active = False
+                return
+            
             # Start kline stream (15-minute intervals)
             def message_handler(ws, message):
                 self.handle_kline_message(message)
             
+            def error_handler(ws, error):
+                print(f"❌ WebSocket error: {error}")
+                self.stream_active = False
+                
+                # Wait a moment before attempting reconnection
+                time.sleep(2)
+                
+                # Attempt to reconnect with IP check
+                print("[WEBSOCKET] Attempting automatic reconnection...")
+                if self.reconnect_websocket():
+                    print("[WEBSOCKET] ✅ Automatic reconnection successful")
+                else:
+                    print("[WEBSOCKET] ❌ Automatic reconnection failed")
+            
+            def close_handler(ws, close_status_code, close_msg):
+                print(f"⚠️  WebSocket connection closed: {close_status_code} - {close_msg}")
+                self.stream_active = False
+                
+                # Wait a moment before attempting reconnection
+                time.sleep(2)
+                
+                # Attempt to reconnect with IP check
+                print("[WEBSOCKET] Attempting automatic reconnection...")
+                if self.reconnect_websocket():
+                    print("[WEBSOCKET] ✅ Automatic reconnection successful")
+                else:
+                    print("[WEBSOCKET] ❌ Automatic reconnection failed")
+            
             # Use the correct method signature for binance-connector
-            self.ws_stream_client = SpotWebsocketStreamClient(on_message=message_handler)
+            self.ws_stream_client = SpotWebsocketStreamClient(
+                on_message=message_handler,
+                on_error=error_handler,
+                on_close=close_handler
+            )
             self.ws_stream_client.kline(
                 symbol=self.symbol.lower(),
                 interval='15m'
             )
             
             self.stream_active = True
+            self.last_message_time = datetime.now()  # Initialize message timer
             print(f"✅ Kline stream started for {self.symbol}")
             print(f"[WEBSOCKET] Stream active status: {self.stream_active}")
             
@@ -237,6 +284,9 @@ class BinanceAPIClient:
     def handle_kline_message(self, msg):
         """Handle incoming kline data from WebSocket"""
         try:
+            # Update last message time for connection health monitoring
+            self.last_message_time = datetime.now()
+            
             # Print heartbeat for WebSocket messages
             # print(f"[WEBSOCKET] Received message at {datetime.now().strftime('%H:%M:%S')}")
             
@@ -337,6 +387,82 @@ class BinanceAPIClient:
             
         except Exception as e:
             print(f"❌ Error stopping kline stream: {e}")
+    
+    def check_websocket_health(self):
+        """Check if WebSocket connection is healthy and reconnect if needed"""
+        try:
+            current_time = datetime.now()
+            
+            # Check if we haven't received any messages for too long
+            if self.last_message_time is None:
+                # First time checking, just record current time
+                self.last_message_time = current_time
+                return True
+            
+            time_since_last_message = (current_time - self.last_message_time).total_seconds()
+            
+            # If no messages received for more than 5 minutes, consider connection dead
+            max_silence_threshold = 300  # 5 minutes
+            
+            if time_since_last_message > max_silence_threshold:
+                print(f"⚠️  WebSocket connection appears dead - no messages for {time_since_last_message:.0f} seconds")
+                return False
+            
+            # Check if stream_active flag is still True
+            if not self.stream_active:
+                print("⚠️  WebSocket stream_active flag is False")
+                return False
+            
+            # Check if WebSocket client exists
+            if self.ws_stream_client is None:
+                print("⚠️  WebSocket client is None")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error checking WebSocket health: {e}")
+            return False
+    
+    def reconnect_websocket(self):
+        """Reconnect WebSocket stream"""
+        try:
+            print("[WEBSOCKET] Attempting to reconnect WebSocket stream...")
+            
+            # Check IP location before reconnecting
+            is_allowed, geo_data = check_ip_location()
+            if not is_allowed:
+                print("[WEBSOCKET] BLOCKED: Reconnection blocked due to IP location check")
+                return False
+            
+            # Stop existing connection
+            if self.ws_stream_client:
+                try:
+                    self.ws_stream_client.stop()
+                except:
+                    pass  # Ignore errors when stopping
+            
+            # Reset connection state
+            self.stream_active = False
+            self.ws_stream_client = None
+            
+            # Wait a moment before reconnecting
+            time.sleep(2)
+            
+            # Start new connection
+            self.start_kline_stream()
+            
+            if self.stream_active:
+                print("✅ WebSocket reconnected successfully")
+                self.last_message_time = datetime.now()  # Reset message timer
+                return True
+            else:
+                print("❌ Failed to reconnect WebSocket")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error reconnecting WebSocket: {e}")
+            return False
     
     def get_account_info(self):
         """Get account information from Binance"""
@@ -1721,16 +1847,38 @@ class BinanceAPIClient:
             
             # Keep the main thread alive and monitor WebSocket health
             last_heartbeat = datetime.now()
-            heartbeat_interval = 60  # Print heartbeat every 30 seconds
+            last_health_check = datetime.now()
+            heartbeat_interval = 60  # Print heartbeat every 60 seconds
+            health_check_interval = 60  # Check connection health every 60 seconds
             
             while self.stream_active:
                 current_time = datetime.now()
                 
+                # Check WebSocket connection health periodically
+                if (current_time - last_health_check).total_seconds() >= health_check_interval:
+                    print(f"[HEALTH_CHECK] Checking WebSocket connection health...")
+                    
+                    if not self.check_websocket_health():
+                        print(f"[HEALTH_CHECK] ❌ WebSocket connection unhealthy, attempting to reconnect...")
+                        if self.reconnect_websocket():
+                            print(f"[HEALTH_CHECK] ✅ WebSocket reconnected successfully")
+                        else:
+                            print(f"[HEALTH_CHECK] ❌ Failed to reconnect WebSocket, will retry next check")
+                    else:
+                        print(f"[HEALTH_CHECK] ✅ WebSocket connection is healthy")
+                    
+                    last_health_check = current_time
+                
                 # Print heartbeat to show the bot is still running
                 if (current_time - last_heartbeat).total_seconds() >= heartbeat_interval:
+                    time_since_last_msg = "N/A"
+                    if self.last_message_time:
+                        time_since_last_msg = f"{(current_time - self.last_message_time).total_seconds():.0f}s ago"
+                    
                     print(f"[HEARTBEAT] Bot is running... Stream active: {self.stream_active}")
                     print(f"[HEARTBEAT] Current time: {current_time.strftime('%H:%M:%S')}")
                     print(f"[HEARTBEAT] Latest data: {self.raw_data['Date'].max() if not self.raw_data.empty else 'No data'}")
+                    print(f"[HEARTBEAT] Last WebSocket message: {time_since_last_msg}")
                     last_heartbeat = current_time
                 
                 time.sleep(1)
