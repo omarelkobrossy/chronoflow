@@ -364,6 +364,8 @@ class BinanceAPIClient:
                     print(f"Predicted price change: {prediction:.4f}")
                     
                     # Execute new trade if conditions are met
+                    self.capital = self.get_usd_balance()
+                    self.fetch_trading_fees()
                     self.execute_trade(prediction, current_price)
                     
                     # Print trading summary
@@ -1828,6 +1830,8 @@ class BinanceAPIClient:
             print(f"Initial prediction: {initial_prediction:.4f} at price ${current_price:.4f}")
             
             # Execute trade if conditions are met
+            self.capital = self.get_usd_balance()
+            self.fetch_trading_fees()
             self.execute_trade(initial_prediction, current_price)
             
             # Print initial trading summary
