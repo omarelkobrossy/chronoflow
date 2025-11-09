@@ -54,13 +54,13 @@ H_default = {
 
 # Fixed parameters
 INITIAL_CAPITAL = 2000
-SLIPPAGE = 0.001
+SLIPPAGE = 0.003
 MAKER_FEE = 0.00095  # 0.6% fee when buying (adding to trade value)
 TAKER_FEE = 0.00095  # 1.2% fee when selling (deducted from sale value)
 
 
 # Flag to skip optimization
-SKIP_OPTIMIZATION = True  # Set to True to use default parameters
+SKIP_OPTIMIZATION = False  # Set to True to use default parameters
 USE_FAPT = False
 OPTIMIZATION_TRIALS = 4000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
@@ -518,7 +518,7 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
                     available_cash = cash_ledger.available_cash
                     if available_cash <= 0:
                         continue
-                    print(available_cash)
+                    #print(available_cash)
                     
                     risk_amount = available_cash * risk_pct
 
@@ -897,7 +897,7 @@ def objective(trial):
 
 if __name__ == "__main__":
     # Load and prepare data
-    data_path = f"DB/{symbol}_fifteenminute_indicators.csv"
+    data_path = f"DB/{symbol}_Binance.csv"
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     #Filter data by time range
