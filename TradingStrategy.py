@@ -244,6 +244,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
+                    trade['exit_time'] = row['Date']
                     trade['exit_price'] = exit_price
                     trade['result'] = 'TP'
                     trade['profit'] = profit
@@ -259,6 +260,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
+                    trade['exit_time'] = row['Date']
                     trade['exit_price'] = exit_price
                     trade['result'] = 'SL'
                     trade['profit'] = profit
@@ -281,6 +283,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         # Only add the profit/loss to capital
                         capital += profit
                         trade['exit_idx'] = idx
+                        trade['exit_time'] = row['Date']
                         trade['exit_price'] = exit_price
                         trade['result'] = 'Partial TP'
                         trade['profit'] = profit
@@ -296,6 +299,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         # Only add the profit/loss to capital
                         capital += profit
                         trade['exit_idx'] = idx
+                        trade['exit_time'] = row['Date']
                         trade['exit_price'] = exit_price
                         trade['result'] = 'BE'
                         trade['profit'] = profit
@@ -312,6 +316,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                     # Only add the profit/loss to capital
                     capital += profit
                     trade['exit_idx'] = idx
+                    trade['exit_time'] = row['Date']
                     trade['exit_price'] = exit_price
                     trade['result'] = 'MAXHOLD'
                     trade['profit'] = profit
@@ -412,6 +417,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         
                     open_trades.append({
                         'entry_idx': idx,
+                        'entry_time': row['Date'],
                         'entry_price': entry_price,
                         'stop_loss': P_sl,
                         'take_profit': P_tp,
@@ -422,6 +428,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
                         'risk_percentage': risk_percentage,
                         'result': None,
                         'exit_idx': None,
+                        'exit_time': None,
                         'exit_price': None,
                         'profit': None
                     })
@@ -450,6 +457,7 @@ def run_strategy(df_window, min_risk_percentage, max_risk_percentage, risk_scali
         # Only add the profit/loss to capital
         capital += profit
         trade['exit_idx'] = len(df_window) - 1
+        trade['exit_time'] = df_window.iloc[-1]['Date']
         trade['exit_price'] = exit_price
         trade['result'] = 'EOD'
         trade['profit'] = profit
@@ -744,12 +752,12 @@ def objective(trial):
 
 if __name__ == "__main__":
     # Load and prepare data
-    data_path = f"DB/{symbol}_fifteenminute_indicators.csv"
+    data_path = f"DB/{symbol}_Binance.csv"
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     #Filter data by time range
-    start_date = '2025-01-15'  # Format: 'YYYY-MM-DD'
-    end_date = '2025-09-09'    # Format: 'YYYY-MM-DD'
+    start_date = '2025-05-15'  # Format: 'YYYY-MM-DD'
+    end_date = '2025-10-28'    # Format: 'YYYY-MM-DD'
 
     # For default mode, use DEFAULT_WINDOW_SIZE for buffering
     if SKIP_OPTIMIZATION:
@@ -1059,7 +1067,12 @@ if __name__ == "__main__":
 
     # Save results
     results_df.to_csv('DB/parameter_optimization_results.csv', index=False)
-    best_params['trade_history'].to_csv('DB/best_parameter_trade_history.csv', index=False)
+    th_df = best_params['trade_history'].copy()
+    if 'entry_time' in th_df.columns:
+        th_df['entry_time'] = pd.to_datetime(th_df['entry_time']).dt.strftime('%Y-%m-%d %H:%M')
+    if 'exit_time' in th_df.columns:
+        th_df['exit_time'] = pd.to_datetime(th_df['exit_time']).dt.strftime('%Y-%m-%d %H:%M')
+    th_df.to_csv('DB/best_parameter_trade_history.csv', index=False)
     print("\nResults saved to DB/parameter_optimization_results.csv")
     print("Best trade history saved to DB/best_parameter_trade_history.csv")
 

@@ -52,20 +52,20 @@ class BinanceAPIClient:
         self.running_stats = {}  # Will store {feature: {'sum': x, 'sum_sq': x, 'count': n}}
         self.last_processed_timestamp = None
         self.trading_params = {
-            "min_risk_percentage": 0.20926163541341056,
-            "max_risk_percentage": 0.7454636143165049,
-            "risk_scaling_factor": 1.687209300056079,
-            "risk_reward_ratio": 1.5243017377060415,
-            "min_predicted_move": 0.009251335191221122,
-            "partial_take_profit": 0.7578576636124249,
-            "min_holding_period": 6,
-            "max_holding_period": 94,
-            "max_concurrent_trades": 4,
-            "stop_loss_atr_multiplier": 3.8144228221199077,
-            "atr_predicted_weight": 0.3207444855006768,
-            "aggressiveness": 4.769133771374405,
-            "feature_count_k": 28,
-            "window_size": 26654
+            "min_risk_percentage": 0.17155081344971024,
+            "max_risk_percentage": 0.729998705497454,
+            "risk_scaling_factor": 2.3441328428531856,
+            "risk_reward_ratio": 1.5470668640510838,
+            "min_predicted_move": 0.009649002992649074,
+            "partial_take_profit": 0.7173316422589391,
+            "min_holding_period": 10,
+            "max_holding_period": 79,
+            "max_concurrent_trades": 6,
+            "stop_loss_atr_multiplier": 1.9297416684696405,
+            "atr_predicted_weight": 0.6838906932404999,
+            "aggressiveness": 3.408910515532858,
+            "feature_count_k": 62,
+            "window_size": 29782
         }
         self.window_size = self.trading_params['window_size']
         
@@ -89,17 +89,17 @@ class BinanceAPIClient:
         self.trade_history = []
         self.capital = 0  # Will be updated from account balance
         self.model_params = {
-            "learning_rate": 0.09531158995737082,
-            "n_estimators": 806,
-            "max_depth": 3,
-            "max_leaves": 32,
-            "min_child_weight": 3.9575884432878152,
-            "gamma": 0.1462577523554158,
-            "subsample": 0.6433981400455924,
-            "colsample_bytree": 0.5190536248420126,
-            "colsample_bylevel": 0.6148249285501425,
-            "reg_lambda": 1.5239773039126334,
-            "reg_alpha": 0.9082001315714298,
+            "learning_rate": 0.055903697861382676,
+            "n_estimators": 583,
+            "max_depth": 4,
+            "max_leaves": 117,
+            "min_child_weight": 2.000632181930146,
+            "gamma": 0.10821055092038931,
+            "subsample": 0.6743322026266234,
+            "colsample_bytree": 0.6483613061124417,
+            "colsample_bylevel": 0.8847160304548035,
+            "reg_lambda": 3.9006036212678663,
+            "reg_alpha": 0.39660556641597106,
             "max_bin": 256,
             'random_state': 42,
             'tree_method': 'hist',

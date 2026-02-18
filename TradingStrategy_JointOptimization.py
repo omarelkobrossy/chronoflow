@@ -63,7 +63,7 @@ TAKER_FEE = 0.00095  # 1.2% fee when selling (deducted from sale value)
 # Flag to skip optimization
 SKIP_OPTIMIZATION = False  # Set to True to use default parameters
 USE_FAPT = False
-OPTIMIZATION_TRIALS = 4000
+OPTIMIZATION_TRIALS = 6000
 RESUME_STUDY = True  # Set to True to resume from previous study, False to start new, None to check if exists
 
 MIN_WINDOW = 300
@@ -615,6 +615,9 @@ def run_strategy(df_window, T, H, feature_cols, target_cols):
     
     # Calculate performance metrics
     results_df = pd.DataFrame(trade_history)
+    if len(results_df) > 0:
+        results_df['entry_time'] = results_df['entry_idx'].map(lambda i: df_window['Date'].iloc[i])
+        results_df['entry_time'] = pd.to_datetime(results_df['entry_time']).dt.strftime('%Y-%m-%d %H:%M')
     returns = equity_curve.pct_change().dropna()
     
     # Calculate final portfolio value for metrics
@@ -854,8 +857,8 @@ def objective(trial):
     
     # Filter data dynamically based on the actual window_size for this trial
     # This ensures we use exactly the right amount of data for each trial
-    start_date = '2025-01-15'
-    end_date = '2025-09-09'
+    start_date = '2023-12-30'
+    end_date = '2026-01-26'
     trial_buffered_start = pd.to_datetime(start_date) - pd.Timedelta(days=T['window_size']*15/60/24)
     df_trial = df[(df['Date'] >= trial_buffered_start) & (df['Date'] <= end_date)]
     
@@ -902,8 +905,8 @@ if __name__ == "__main__":
     df, feature_cols, target_cols = preprocess_data(pd.read_csv(data_path))
     
     #Filter data by time range
-    start_date = '2025-01-15'  # Format: 'YYYY-MM-DD'
-    end_date = '2025-09-09'    # Format: 'YYYY-MM-DD'
+    start_date = '2023-12-30'  # Format: 'YYYY-MM-DD'
+    end_date = '2026-01-26'    # Format: 'YYYY-MM-DD'
 
     # For default mode, use DEFAULT_WINDOW_SIZE for buffering
     if SKIP_OPTIMIZATION:

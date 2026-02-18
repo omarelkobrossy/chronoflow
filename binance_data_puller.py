@@ -16,7 +16,7 @@ class BinanceDataPuller:
     and save it in the same format as CoinbaseDataPuller.
     """
     
-    def __init__(self, api_key=None, api_secret=None, symbol='XRP/USDC', years_of_data=3):
+    def __init__(self, api_key=None, api_secret=None, symbol='XRP/USDC', years_of_data=4):
         """
         Initialize the Binance data puller.
         
@@ -240,7 +240,7 @@ def main():
     """Main function to demonstrate usage."""
     
     # Initialize the data puller (will automatically load API keys from file)
-    puller = BinanceDataPuller(symbol='XRP/USDC', years_of_data=2)
+    puller = BinanceDataPuller(symbol='XRP/USDC', years_of_data=4)
     
     # Check if we have API credentials
     if not puller.client:
