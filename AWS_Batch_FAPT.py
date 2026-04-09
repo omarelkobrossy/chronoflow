@@ -4,6 +4,12 @@ import os
 import subprocess
 # from utils import preprocess_data
 
+# AWS Batch infrastructure identifiers.
+# Set these as environment variables or edit the defaults below.
+# Do NOT commit real ARNs or account-specific values to source control.
+_AWS_JOB_QUEUE = os.environ.get("AWS_BATCH_JOB_QUEUE", "MLTraderQueue")
+_AWS_JOB_DEFINITION = os.environ.get("AWS_BATCH_JOB_DEFINITION", "")
+
 def generate_window_indices(data_length, window_size, step_size):
     indices = []
     i = 0
@@ -22,8 +28,11 @@ def main():
     window_size = 2350
     step_size = 310
     num_instances = 20
-    job_queue = "MLTraderQueue"  # <-- EDIT THIS
-    job_definition = "arn:aws:batch:us-east-1:671583585806:job-definition/ML-Trader-Job-Definition:8"  # <-- EDIT THIS
+    job_queue = _AWS_JOB_QUEUE
+    job_definition = _AWS_JOB_DEFINITION
+    if not job_definition:
+        raise ValueError("AWS_BATCH_JOB_DEFINITION environment variable is not set. "
+                         "Set it to your job definition ARN before running.")
     job_name_prefix = "fapt"
 
     df = pd.read_csv(data_path)

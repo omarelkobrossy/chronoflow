@@ -1,6 +1,49 @@
 {
-    "optimization_date": "2026-02-17 19:20:07",
+    "optimization_date": "2026-02-21 20:22:21",
     "top_parameters": [
+        {
+            "trial_number": 2962,
+            "score": 6167.62919455679,
+            "trading_parameters": {
+                "min_risk_percentage": 0.1539937607718842,
+                "max_risk_percentage": 0.7412613993994547,
+                "risk_scaling_factor": 2.2885683264211627,
+                "risk_reward_ratio": 1.6025439113297417,
+                "min_predicted_move": 0.008945178242107743,
+                "partial_take_profit": 0.7723267379315765,
+                "min_holding_period": 9,
+                "max_holding_period": 72,
+                "max_concurrent_trades": 5,
+                "stop_loss_atr_multiplier": 2.307040662511872,
+                "atr_predicted_weight": 0.5664150869721071,
+                "aggressiveness": 1.1242694710998204,
+                "feature_count_k": 28,
+                "window_fraction": 0.4220507927036183,
+                "calculated_window_size": 30819
+            },
+            "model_parameters": {
+                "learning_rate": 0.07199550894915294,
+                "n_estimators": 336,
+                "max_depth": 3,
+                "max_leaves": 123,
+                "min_child_weight": 0.8889040718341644,
+                "gamma": 0.11991408603942731,
+                "subsample": 0.6810999102889358,
+                "colsample_bytree": 0.5115956657024607,
+                "colsample_bylevel": 0.7911837363319085,
+                "reg_lambda": 3.1299894619376833,
+                "reg_alpha": 0.5253492302218684
+            },
+            "metrics": {
+                "total_return": 349190.9921402024,
+                "sharpe_ratio": 0.8551854893766891,
+                "win_rate": 52.30706410779911,
+                "max_drawdown": -14.366134270042608,
+                "cagr": 88604.98913683758,
+                "mar": 6167.62919455679,
+                "trade_count": 2449
+            }
+        },
         {
             "trial_number": 1965,
             "score": 5644.805681915338,
@@ -85,6 +128,49 @@
                 "cagr": 69638.6382706747,
                 "mar": 5406.54949933561,
                 "trade_count": 2429
+            }
+        },
+        {
+            "trial_number": 3114,
+            "score": 5325.712725724676,
+            "trading_parameters": {
+                "min_risk_percentage": 0.1702079099630987,
+                "max_risk_percentage": 0.744764597430505,
+                "risk_scaling_factor": 2.2755662472351705,
+                "risk_reward_ratio": 1.5823370105499197,
+                "min_predicted_move": 0.008949368894112767,
+                "partial_take_profit": 0.773349702768009,
+                "min_holding_period": 8,
+                "max_holding_period": 73,
+                "max_concurrent_trades": 5,
+                "stop_loss_atr_multiplier": 2.4307231497903476,
+                "atr_predicted_weight": 0.46318389254394055,
+                "aggressiveness": 1.1748419438896807,
+                "feature_count_k": 25,
+                "window_fraction": 0.4230929423513457,
+                "calculated_window_size": 30895
+            },
+            "model_parameters": {
+                "learning_rate": 0.0691857239044563,
+                "n_estimators": 389,
+                "max_depth": 3,
+                "max_leaves": 120,
+                "min_child_weight": 0.8346489550259731,
+                "gamma": 0.09550912990143635,
+                "subsample": 0.6875919109965776,
+                "colsample_bytree": 0.5176328870974611,
+                "colsample_bylevel": 0.8558179697645353,
+                "reg_lambda": 4.084131248132873,
+                "reg_alpha": 0.5376352996421105
+            },
+            "metrics": {
+                "total_return": 272020.49543572287,
+                "sharpe_ratio": 0.8216572626936599,
+                "win_rate": 51.04364326375711,
+                "max_drawdown": -13.717966636578405,
+                "cagr": 73057.94948749214,
+                "mar": 5325.712725724676,
+                "trade_count": 2635
             }
         },
         {
@@ -303,132 +389,46 @@
             }
         },
         {
-            "trial_number": 2115,
-            "score": 4635.6704885543095,
+            "trial_number": 3014,
+            "score": 4695.210850891254,
             "trading_parameters": {
-                "min_risk_percentage": 0.16791806862470549,
-                "max_risk_percentage": 0.7279054202396563,
-                "risk_scaling_factor": 2.274436202133069,
-                "risk_reward_ratio": 1.521914475665713,
-                "min_predicted_move": 0.009235678551430366,
-                "partial_take_profit": 0.7498607479721524,
-                "min_holding_period": 12,
-                "max_holding_period": 79,
-                "max_concurrent_trades": 6,
-                "stop_loss_atr_multiplier": 2.015460534404865,
-                "atr_predicted_weight": 0.5379479328297805,
-                "aggressiveness": 1.298834344710171,
-                "feature_count_k": 61,
-                "window_fraction": 0.4146251558027462,
-                "calculated_window_size": 30277
-            },
-            "model_parameters": {
-                "learning_rate": 0.058039492745936866,
-                "n_estimators": 463,
-                "max_depth": 4,
-                "max_leaves": 127,
-                "min_child_weight": 1.2015996217263587,
-                "gamma": 0.09305851573496776,
-                "subsample": 0.6569731258683508,
-                "colsample_bytree": 0.6044012079913409,
-                "colsample_bylevel": 0.8954828863904071,
-                "reg_lambda": 3.5084935040406395,
-                "reg_alpha": 0.3822455031119869
-            },
-            "metrics": {
-                "total_return": 258898.11529428925,
-                "sharpe_ratio": 0.8541840823207832,
-                "win_rate": 55.6245151280062,
-                "max_drawdown": -13.639201073650964,
-                "cagr": 63226.84190458202,
-                "mar": 4635.6704885543095,
-                "trade_count": 2578
-            }
-        },
-        {
-            "trial_number": 2896,
-            "score": 4621.113391753863,
-            "trading_parameters": {
-                "min_risk_percentage": 0.15486167861310002,
-                "max_risk_percentage": 0.7331469022695933,
-                "risk_scaling_factor": 2.27629247854818,
-                "risk_reward_ratio": 1.5868030422220556,
-                "min_predicted_move": 0.009367262915829436,
-                "partial_take_profit": 0.7632630347285496,
-                "min_holding_period": 11,
+                "min_risk_percentage": 0.15951342627216195,
+                "max_risk_percentage": 0.7353064248454099,
+                "risk_scaling_factor": 1.5413874481931518,
+                "risk_reward_ratio": 1.5616005778277071,
+                "min_predicted_move": 0.008883797867486635,
+                "partial_take_profit": 0.7647836213530816,
+                "min_holding_period": 10,
                 "max_holding_period": 75,
                 "max_concurrent_trades": 5,
-                "stop_loss_atr_multiplier": 2.1968312852931056,
-                "atr_predicted_weight": 0.5681573803878933,
-                "aggressiveness": 1.4770041899807775,
-                "feature_count_k": 27,
-                "window_fraction": 0.414624274563401,
-                "calculated_window_size": 30277
+                "stop_loss_atr_multiplier": 2.3459447480599858,
+                "atr_predicted_weight": 0.45767527028136223,
+                "aggressiveness": 1.2784979158708556,
+                "feature_count_k": 29,
+                "window_fraction": 0.4080342853865805,
+                "calculated_window_size": 29796
             },
             "model_parameters": {
-                "learning_rate": 0.07630191536920367,
-                "n_estimators": 332,
+                "learning_rate": 0.06705086427731469,
+                "n_estimators": 326,
                 "max_depth": 3,
-                "max_leaves": 126,
-                "min_child_weight": 0.9970765392685361,
-                "gamma": 0.13179535145939936,
-                "subsample": 0.6816624929623908,
-                "colsample_bytree": 0.5165836178140607,
-                "colsample_bylevel": 0.8687496463013805,
-                "reg_lambda": 3.4875184337777805,
-                "reg_alpha": 0.45946372972682614
+                "max_leaves": 123,
+                "min_child_weight": 0.8208078318818393,
+                "gamma": 0.08887051596365922,
+                "subsample": 0.6766526544186097,
+                "colsample_bytree": 0.5482877711398282,
+                "colsample_bylevel": 0.8512268050193309,
+                "reg_lambda": 3.5810099359945693,
+                "reg_alpha": 0.46856415033680426
             },
             "metrics": {
-                "total_return": 243252.64978131445,
-                "sharpe_ratio": 0.8282930235244459,
-                "win_rate": 55.22522522522523,
-                "max_drawdown": -12.998939036484147,
-                "cagr": 60069.571260088946,
-                "mar": 4621.113391753863,
-                "trade_count": 2220
-            }
-        },
-        {
-            "trial_number": 2401,
-            "score": 4602.208101105466,
-            "trading_parameters": {
-                "min_risk_percentage": 0.17152183473539911,
-                "max_risk_percentage": 0.7407508856913276,
-                "risk_scaling_factor": 2.3141022291558193,
-                "risk_reward_ratio": 1.5004020454371043,
-                "min_predicted_move": 0.009150508131080164,
-                "partial_take_profit": 0.7441860812857606,
-                "min_holding_period": 13,
-                "max_holding_period": 76,
-                "max_concurrent_trades": 5,
-                "stop_loss_atr_multiplier": 2.1192560318698144,
-                "atr_predicted_weight": 0.5358724445595847,
-                "aggressiveness": 1.6526197580171988,
-                "feature_count_k": 64,
-                "window_fraction": 0.4098329782402651,
-                "calculated_window_size": 29927
-            },
-            "model_parameters": {
-                "learning_rate": 0.06668389444248464,
-                "n_estimators": 365,
-                "max_depth": 4,
-                "max_leaves": 126,
-                "min_child_weight": 1.0362153636960854,
-                "gamma": 0.10472472181007922,
-                "subsample": 0.6558121441214604,
-                "colsample_bytree": 0.605945857860598,
-                "colsample_bylevel": 0.8745014423688624,
-                "reg_lambda": 4.308768085710805,
-                "reg_alpha": 0.4335506006662918
-            },
-            "metrics": {
-                "total_return": 273346.489965057,
-                "sharpe_ratio": 0.8270996628810133,
-                "win_rate": 55.78231292517006,
-                "max_drawdown": -13.752967264147031,
-                "cagr": 63294.01735729575,
-                "mar": 4602.208101105466,
-                "trade_count": 2499
+                "total_return": 287328.59320447844,
+                "sharpe_ratio": 0.8359925520818525,
+                "win_rate": 50.95880681818182,
+                "max_drawdown": -13.64083101167729,
+                "cagr": 64046.577781201144,
+                "mar": 4695.210850891254,
+                "trade_count": 2816
             }
         }
     ]

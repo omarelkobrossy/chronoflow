@@ -70,9 +70,7 @@ class CoinbaseDataPuller:
                     self.api_key = key_data['name']
                     self.api_secret = key_data['privateKey']
                     
-                    logger.info(f"Loaded API keys from {self.api_key_file}")
-                    logger.info(f"API Key: {self.api_key}")
-                    logger.info(f"API Secret: {self.api_secret[:20]}...")
+                    logger.info("Coinbase CDP API credentials loaded successfully")
                 else:
                     logger.warning(f"Invalid API key format in {self.api_key_file}")
                     logger.warning("Using public endpoints only")

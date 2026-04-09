@@ -60,9 +60,7 @@ class BinanceDataPuller:
             if api_key and api_secret:
                 self.api_key = api_key
                 self.api_secret = api_secret
-                logger.info("Loaded API keys from settings/binance_api_key.json")
-                logger.info(f"API Key: {self.api_key}")
-                logger.info(f"API Secret: {self.api_secret[:20]}...")
+                logger.info("Binance API credentials loaded successfully")
             else:
                 logger.warning("Failed to load API keys from file")
                 logger.warning("Using public endpoints only")

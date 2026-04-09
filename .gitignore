@@ -5,8 +5,22 @@ __pycache__/
 *.pyw
 *.pyz
 *.pywz
-DB/*
+
+# ── Secrets and credentials (never commit these) ────────────────────────────
 .env
 settings/cdp_api_key.json
 settings/binance_api_key.json
+settings/binance_api_key_*.json
+settings/*.key
+settings/*.pem
+*.p8
+*.pem
+*.key
+
+# ── Data and generated output ───────────────────────────────────────────────
+DB/*
 Visualization/*
+
+# ── Project-specific ignores ────────────────────────────────────────────────
+CLAUDE.md
+TRADING_SYSTEM_FULL_DOCUMENTATION.md
