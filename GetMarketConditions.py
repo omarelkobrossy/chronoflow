@@ -30,7 +30,7 @@ def fetch_market_data(symbols=None, interval="15min", outputsize="full", years=1
         }
     
     # Alpha Vantage API configuration
-    API_KEY = "REDACTED_ALPHA_VANTAGE_KEY"
+    API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
     BASE_URL = "https://www.alphavantage.co/query"
     
     # Define the path to save the consolidated market data
