@@ -16,7 +16,29 @@ import time
 
 
 
-def preprocess_data(df):
+def preprocess_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """
+    Prepare a raw OHLCV + feature DataFrame for model training or inference.
+
+    Steps performed:
+        1. Normalises the datetime index column and sorts chronologically.
+        2. Imputes missing values — expanding/rolling mean for numerics,
+           forward/back fill for categoricals and datetimes.
+        3. Converts boolean columns to integer (0/1).
+        4. Replaces infinite values with imputed means.
+        5. Label-encodes any remaining object columns.
+        6. Separates the target variable(s) and base OHLCV columns from
+           the returned feature list.
+
+    Args:
+        df: Raw DataFrame containing OHLCV columns, engineered features,
+            and the target column ``Price_Change_5``.
+
+    Returns:
+        df:           Cleaned DataFrame with all columns ready for scaling.
+        feature_cols: List of column names to use as model inputs.
+        target_cols:  List containing the target column name(s).
+    """
     print("\nStarting data preprocessing...")
 
     # Convert the index column to datetime if it exists
@@ -147,7 +169,21 @@ def _expanding_zscore_no_lookahead(df_num: pd.DataFrame) -> np.ndarray:
     Z[0, :] = 0.0
     return Z.astype(np.float32, copy=False)
 
-def make_ref_bins(x_ref, bins=20):
+def make_ref_bins(x_ref: np.ndarray, bins: int = 20) -> np.ndarray:
+    """
+    Build a set of strictly-increasing quantile bin edges from a reference array.
+
+    Edges are derived from the training slice only (no lookahead).  Duplicate
+    quantile values are nudged by a small epsilon so every histogram bucket is
+    non-empty by construction.
+
+    Args:
+        x_ref: 1-D reference array (typically the training window of one feature).
+        bins:  Number of equal-probability bins (default 20).
+
+    Returns:
+        Array of ``bins + 1`` strictly-increasing edge values with ±inf caps.
+    """
     # quantile edges from the *training* slice; strictly increasing
     q = np.quantile(x_ref[~np.isnan(x_ref)], np.linspace(0, 1, bins+1))
     q[0], q[-1] = -np.inf, np.inf
@@ -157,7 +193,30 @@ def make_ref_bins(x_ref, bins=20):
             q[i] = q[i-1] + 1e-12
     return q
 
-def psi_from_bins(x_ref, x_cur, edges, eps=1e-9):
+def psi_from_bins(
+    x_ref: np.ndarray,
+    x_cur: np.ndarray,
+    edges: np.ndarray,
+    eps: float = 1e-9,
+) -> float:
+    """
+    Compute the Population Stability Index (PSI) between two distributions.
+
+    PSI = Σ (ref_pct − cur_pct) × ln(ref_pct / cur_pct)
+
+    Both histograms are built using the *training* bin edges so the comparison
+    is anchored to the reference distribution's shape.  A PSI < 0.1 indicates
+    stable feature distributions; > 0.2 suggests significant drift.
+
+    Args:
+        x_ref:  Reference (training) array for one feature.
+        x_cur:  Current (live/validation) array for the same feature.
+        edges:  Bin edges produced by :func:`make_ref_bins`.
+        eps:    Floor applied to bin proportions to avoid log(0).
+
+    Returns:
+        Scalar PSI value (non-negative float).
+    """
     # histogram using TRAIN edges for both ref and current
     r = np.histogram(x_ref[~np.isnan(x_ref)], edges)[0].astype(np.float64)
     c = np.histogram(x_cur[~np.isnan(x_cur)], edges)[0].astype(np.float64)
@@ -166,14 +225,46 @@ def psi_from_bins(x_ref, x_cur, edges, eps=1e-9):
     r = np.clip(r, eps, None); c = np.clip(c, eps, None)
     return float(np.sum((r - c) * np.log(r / c)))
 
-def hist_pdf(arr, edges, eps=1e-9):
+def hist_pdf(arr: np.ndarray, edges: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    """
+    Compute a normalised histogram probability density from pre-computed edges.
+
+    Args:
+        arr:   Input array (NaN values are excluded).
+        edges: Bin edges produced by :func:`make_ref_bins`.
+        eps:   Minimum bin probability floor (avoids log(0) in PSI calcs).
+
+    Returns:
+        Array of length ``len(edges) - 1`` summing to ≈ 1.0.
+    """
     h = np.histogram(arr[~np.isnan(arr)], edges)[0].astype(np.float64)
     s = h.sum()
     if s <= 0:
         return np.full_like(h, 1.0 / len(h), dtype=np.float64)
     return np.maximum(h / s, eps)
 
-def psi_with_ref_pdf(cur_arr, edges, ref_pdf, eps=1e-9):
+def psi_with_ref_pdf(
+    cur_arr: np.ndarray,
+    edges: np.ndarray,
+    ref_pdf: np.ndarray,
+    eps: float = 1e-9,
+) -> float:
+    """
+    Compute PSI when the reference PDF is already pre-computed.
+
+    Avoids re-histogramming the reference array on every call, which makes
+    this the preferred variant for live inference loops where the reference
+    distribution is cached once at training time.
+
+    Args:
+        cur_arr: Current feature array to compare against the reference.
+        edges:   Bin edges from :func:`make_ref_bins` (training slice).
+        ref_pdf: Pre-computed reference PDF from :func:`hist_pdf`.
+        eps:     Minimum bin probability floor.
+
+    Returns:
+        Scalar PSI value (non-negative float).
+    """
     cur_pdf = hist_pdf(cur_arr, edges, eps)
     # PSI = sum( (ref - cur) * log(ref/cur) )
     return float(np.sum((ref_pdf - cur_pdf) * np.log(ref_pdf / cur_pdf)))
@@ -353,7 +444,8 @@ def standardize_expanding_train(train_df, cols):
     return Xtr
 
 
-def clamp(value, min_value, max_value):
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    """Clamp *value* to the closed interval [min_value, max_value]."""
     return max(min_value, min(value, max_value))
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
@@ -438,13 +530,52 @@ def mar_signed_tanh(mar, s=50.0):
     return float(np.tanh(mar / s))
 
 
-def trade_factor_bandpass(n_per_year, lo=800.0, hi=2000.0, k=200.0, floor=0.1):
+def trade_factor_bandpass(
+    n_per_year: float,
+    lo: float = 800.0,
+    hi: float = 2000.0,
+    k: float = 200.0,
+    floor: float = 0.1,
+) -> float:
+    """
+    Sigmoid bandpass filter that rewards trade frequency within a target range.
+
+    Returns a value in (floor, 1.0].  Strategies with annualised trade counts
+    between *lo* and *hi* receive scores near 1.0; counts outside this window
+    are penalised smoothly via logistic roll-off rather than a hard cutoff.
+
+    Args:
+        n_per_year: Annualised trade count for the candidate strategy.
+        lo:         Lower target boundary (default 800 trades/year).
+        hi:         Upper target boundary (default 2000 trades/year).
+        k:          Sigmoid slope — smaller values widen the transition band.
+        floor:      Minimum score returned (prevents zeroing out marginal trials).
+
+    Returns:
+        Scalar in [floor, 1.0].
+    """
     s_lo = 1.0 / (1.0 + np.exp(-(n_per_year - lo) / k))
     s_hi = 1.0 / (1.0 + np.exp(-(hi - n_per_year) / k))
     tf = s_lo * s_hi
     return max(tf, floor)   # never 0; still distinguishes outside-band trials 
 
-def win_edge_factor(win_rate_pct, rr, k=6.0):
+def win_edge_factor(win_rate_pct: float, rr: float, k: float = 6.0) -> float:
+    """
+    Compute a logistic edge factor relative to the breakeven win rate.
+
+    The breakeven win rate for a given risk-reward ratio is 1 / (1 + RR).
+    This function maps the distance between the actual win rate and that
+    breakeven point onto (0, 1) via a logistic curve, making it suitable
+    as a smooth multiplicative penalty/reward in composite objective functions.
+
+    Args:
+        win_rate_pct: Observed win rate as a percentage (e.g. 55.0 for 55%).
+        rr:           Risk-reward ratio (target profit / stop loss distance).
+        k:            Logistic sharpness — higher values steepen the curve.
+
+    Returns:
+        Scalar in (0, 1).  Returns 0.5 at the breakeven win rate.
+    """
     w = win_rate_pct / 100.0
     w_be = 1.0 / (1.0 + rr)                   # breakeven win rate
     raw = (w - w_be) / max(1e-9, 1.0 - w_be)  # ≈ -1..1
@@ -822,22 +953,54 @@ def analyze_confidence_vs_success(trade_history_df, symbol):
     print(f"   - DB/charts/{symbol}_detailed_confidence_analysis.png")
     print(f"{'='*60}")
 
-def send_telegram_message(message: str):
+def send_telegram_message(message: str) -> dict:
     """
-    Sends a message to a Telegram chat using a bot.
+    Sends a notification message to a configured Telegram chat.
 
-    :param chat_id: The chat ID of the recipient (can be a user or group ID)
-    :param message: The text message to send
+    Requires the following environment variables:
+        TELEGRAM_BOT_TOKEN: The bot token issued by BotFather.
+        TELEGRAM_CHAT_ID:   The target chat or user ID.
+
+    Args:
+        message: Plain-text message body to send.
+
+    Returns:
+        The Telegram API JSON response dict, or an error dict if
+        credentials are not configured.
     """
-    url = f"https://api.telegram.org/botREDACTED_TELEGRAM_TOKEN/sendMessage"
-    payload = {
-        "chat_id": REDACTED_CHAT_ID,
-        "text": message
-    }
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        print("[Telegram] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — skipping notification.")
+        return {"ok": False, "description": "Credentials not configured"}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
     response = requests.post(url, data=payload)
     return response.json()
 
-def expected_slippage_bps(bar, notional_Q, params):
+def expected_slippage_bps(bar: dict, notional_Q: float, params) -> float:
+    """
+    Estimate expected transaction cost in basis points for a single order.
+
+    The model combines three components:
+        1. **Spread cost** — half-spread multiplied by taker probability.
+        2. **Market impact** — square-root price impact scaled by participation rate.
+        3. **Illiquidity adjustment** — Amihud illiquidity ratio modulates impact.
+
+    Args:
+        bar:        OHLCV bar dict with keys ``High``, ``Low``, ``Close``,
+                    ``Volume``, and ``Return``.
+        notional_Q: Order notional value in quote currency (USD / USDC).
+        params:     Parameter namespace with attributes:
+                        ``c_spr``      — spread coefficient,
+                        ``taker_prob`` — probability of crossing the spread,
+                        ``Y``          — market impact coefficient,
+                        ``a``          — illiquidity scaling constant,
+                        ``beta``       — illiquidity exponent.
+
+    Returns:
+        Estimated slippage in basis points (1 bps = 0.01%).
+    """
     mid   = 0.5 * (bar['High'] + bar['Low'])
     Vdol  = bar['Close'] * bar['Volume'] + 1e-12
     sigma = (bar['High'] - bar['Low']) / max(mid, 1e-12)
@@ -889,86 +1052,21 @@ def fmt_price(p, tick):
     # Limit-maker must be on a valid tick
     return f"{pr:.{prec}f}".rstrip("0").rstrip(".")
 
-def floor_to_step(x, step):
-    import math
+def floor_to_step(x: float, step: float) -> float:
+    """
+    Floor *x* to the nearest multiple of *step* (exchange lot/tick granularity).
+
+    Args:
+        x:    Raw quantity or price value.
+        step: Step size from the exchange's LOT_SIZE or PRICE_FILTER rule.
+
+    Returns:
+        Largest multiple of *step* that does not exceed *x*.
+    """
     prec = max(0, int(round(-math.log10(step))))
     return math.floor(x * (10**prec)) / (10**prec)
 
 
-def check_ip_location(max_retries=3, timeout=10):
-    """
-    Check if current IP is from a blocked country (US) with exponential backoff retry
-    
-    Args:
-        max_retries: Maximum number of retry attempts
-        timeout: Request timeout in seconds
-    
-    Returns:
-        tuple: (is_allowed, geo_data) where is_allowed is False if IP is from US
-    """
-    blocked_countries = ['US', 'United States']
-    
-    for attempt in range(max_retries + 1):
-        try:
-            # Step 1: Get your public IP
-            ip_response = requests.get("https://api.ipify.org", timeout=timeout)
-            if ip_response.status_code != 200:
-                raise requests.RequestException(f"Failed to get IP: HTTP {ip_response.status_code}")
-            
-            ip = ip_response.text.strip()
-            
-            # Step 2: Query geolocation API with browser-like headers
-            geo_headers = {
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
-                'Referer': 'https://ipapi.co/',
-                'Origin': 'https://ipapi.co'
-            }
-            geo_response = requests.get(f"https://ipapi.co/{ip}/json/", headers=geo_headers, timeout=timeout)
-            if geo_response.status_code != 200:
-                raise requests.RequestException(f"Failed to get geolocation: HTTP {geo_response.status_code}")
-            
-            geo = geo_response.json()
-            
-            # Check for API errors
-            if geo.get("error"):
-                if attempt < max_retries:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return True, None
-            
-            # Extract location info
-            country_code = geo.get("country", "").upper()
-            country_name = geo.get("country_name", "")
-            
-            # Check if country is in blocked list
-            is_blocked = (country_code in blocked_countries or 
-                         country_name in blocked_countries)
-            
-            if is_blocked:
-                print(f"[IP_CHECK] BLOCKED: IP from {country_name} ({country_code})")
-                return False, geo
-            else:
-                return True, geo
-                
-        except requests.exceptions.Timeout:
-            if attempt < max_retries:
-                wait_time = 2 ** attempt
-                time.sleep(wait_time)
-                continue
-            else:
-                return True, None
-                
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries:
-                wait_time = 2 ** attempt
-                time.sleep(wait_time)
-                continue
-            else:
-                return True, None
                 
         except Exception as e:
             if attempt < max_retries:

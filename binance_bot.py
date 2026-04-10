@@ -13,7 +13,7 @@ import threading
 from binance.spot import Spot
 from binance.websocket.spot.websocket_api import SpotWebsocketAPIClient
 from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
-from utils import send_telegram_message, get_filters, fmt_qty, fmt_price, floor_to_step, check_ip_location
+from utils import send_telegram_message, get_filters, fmt_qty, fmt_price, floor_to_step
 
 # Add the Quant directory to the path to import from GatherData.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Quant'))
@@ -222,13 +222,6 @@ class BinanceAPIClient:
         try:
             print(f"Starting kline stream for {self.symbol}...")
             
-            # Check IP location before starting stream
-            is_allowed, geo_data = check_ip_location()
-            if not is_allowed:
-                print("[WEBSOCKET] BLOCKED: Stream start blocked due to IP location check")
-                self.stream_active = False
-                return
-            
             # Start kline stream (15-minute intervals)
             def message_handler(ws, message):
                 self.handle_kline_message(message)
@@ -430,12 +423,6 @@ class BinanceAPIClient:
         """Reconnect WebSocket stream"""
         try:
             print("[WEBSOCKET] Attempting to reconnect WebSocket stream...")
-            
-            # Check IP location before reconnecting
-            is_allowed, geo_data = check_ip_location()
-            if not is_allowed:
-                print("[WEBSOCKET] BLOCKED: Reconnection blocked due to IP location check")
-                return False
             
             # Stop existing connection
             if self.ws_stream_client:
