@@ -1,4 +1,4 @@
-# Regime-Adaptive ML Trading System
+# Regime-Adaptive ML System For Non-Stationary Markets
 *An adaptive ML system for non-stationary time-series environments*
 
 A machine learning system designed for **decision-making under non-stationarity**, where both the model and its execution behavior must continuously adapt to shifting data distributions.
