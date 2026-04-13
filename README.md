@@ -84,32 +84,92 @@ flowchart TD
 
 FAPT rejects the premise that a single globally optimal parameter set exists.
 
-FAPT effectively reframes optimization as a **nearest-neighbor retrieval problem in regime space**, rather than a repeated global search.
+Rather than treating optimization as a nearest-neighbor lookup, FAPT models parameter selection as a **continuous function over regime space**, using distributional similarity to interpolate between historically optimal configurations.
 
-**The insight:** Historical market windows are not interchangeable. A parameter set optimized on a high-volatility trending regime will behave differently than one trained on a mean-reverting range-bound period. Rather than averaging across all history, the system should identify *which historical conditions are most similar to now* and retrieve the parameters that performed best under those conditions.
+**The insight:** Historical market windows are not discrete states but points in a continuous space of market conditions. A parameter set optimized for one regime may still be partially valid in a nearby regime. Instead of selecting a single closest match, the system blends information from multiple regimes based on similarity.
 
-**Pipeline:**
+---
+
+### Regime Matching and Parameter Interpolation
+
+At runtime:
+
+1. The current market window is represented as a feature distribution
+2. Wasserstein distance is computed between the current distribution and all historical windows
+3. Multiple nearby regimes are considered, not just the closest one
+4. Parameters are computed as a **distance-weighted combination** of the top matching regimes
+
+This results in behavior such as:
+
+* if the current regime lies between two historical regimes
+* parameters will be interpolated accordingly (e.g., 80% regime A, 20% regime B)
+
+---
+
+### Pipeline
 
 ```mermaid
 flowchart LR
     A[Full History] --> B[Rolling Window Slicing]
     B --> C[Per-Window Optuna Optimization]
     C --> D[Regime Library<br>params + feature distributions]
+
     E[Current Market Window] --> F[Feature Distribution]
     F --> G[Wasserstein Distance<br>to each historical window]
+
     D --> G
-    G --> H[Nearest Regime Match]
-    H --> I[Deploy Matched Parameters]
+    G --> H[Top-K Similar Regimes]
+
+    H --> I[Distance-Weighted<br>Parameter Blending]
+
+    I --> J[Deploy Adapted Parameters]
 ```
 
+---
 
+### Offline Phase (AWS Batch)
 
-1. **Offline (AWS Batch):** Full history is divided into rolling windows. Each window runs an independent Optuna optimization study. Results are stored as a regime library: `{window → best_params, feature_distribution}`.
-2. **At runtime:** The current market window's feature distribution is compared to every historical window using Wasserstein distance. The parameters from the closest historical regime are deployed.
+* Historical data is divided into rolling windows
+* Each window runs an independent optimization study
+* Results are stored as:
+  `{window → optimal_parameters, feature_distribution}`
 
-This converts optimization from a global solve into a **conditional, regime-aware retrieval problem**.
+This forms a **regime library** of parameter-performance mappings.
 
-**Current status:** Fully implemented. Disabled pending migration of regime library from legacy equities pipeline to crypto data.
+---
+
+### Runtime Behavior
+
+Instead of selecting a single regime, the system performs:
+
+* **soft matching** across multiple regimes
+* **distance-weighted interpolation** of parameter sets
+
+This converts optimization from:
+
+* a global static solve
+  to:
+* a **continuous, regime-aware parameter mapping**
+
+---
+
+### Why This Matters
+
+A nearest-neighbor approach introduces discontinuities:
+
+* small changes in market conditions can cause large parameter jumps
+
+FAPT avoids this by:
+
+* producing **smooth transitions between parameter configurations**
+* maintaining stability across borderline regimes
+* better capturing the continuous nature of market dynamics
+
+---
+
+### Current Status
+
+Fully implemented. Computationally expensive due to per-window optimization. Preliminary experiments indicate performance comparable to the conservative joint optimization baseline under similar evaluation conditions. Further large-scale validation is pending.
 
 ---
 
@@ -245,32 +305,45 @@ Both modes share `GatherData.py`, ensuring training and inference operate on ide
 
 ## Engineering Challenges
 
-**Non-stationarity across multiple timescales.** The system must handle regime shifts at three timescales: intraday volatility cycles, multi-week market regime changes, and structural macro-driven breaks. PSI retraining addresses short/medium timescales. FAPT targets longer structural shifts. Neither mechanism alone is sufficient. They are designed as complementary layers.
+**Non-stationarity across multiple timescales.** The system must handle regime shifts at multiple horizons: intraday volatility cycles, medium-term structural drift, and longer macro-driven changes. PSI retraining addresses short-to-medium-term distribution drift. FAPT provides regime-aware parameter adaptation at a structural level using continuous similarity in regime space. These mechanisms operate at different timescales and are designed as complementary layers rather than independent solutions.
 
-**Temporal integrity across two runtimes.** The backtest and live system must produce identical feature values for identical input. The `.shift(1)` gate handles training-time leakage, but live inference must incrementally update running statistics without future bar access. The expanding scaler's running state must be correctly initialized from historical warmup data at cold start. This is a non-obvious consistency requirement.
+**Temporal integrity across two runtimes.** The backtest and live system must produce identical feature values for identical input. The `.shift(1)` gate prevents training-time leakage, but live inference must maintain strict past-only state updates. The expanding scaler requires correct initialization from historical warmup data and must update incrementally without access to future bars. Maintaining consistency between offline and live pipelines is a non-trivial systems constraint.
 
-**Joint optimization search space.** Simultaneously tuning 18+ parameters across model architecture and execution creates a high-dimensional, non-convex search space. Parameters like `feature_count_k` and `window_fraction` interact with training time in ways the objective function cannot fully capture. TPE sampler explores this space without prior knowledge of parameter interactions.
+**Joint optimization search space.** Simultaneously tuning model architecture and execution parameters creates a high-dimensional, non-convex optimization problem. Parameters such as `feature_count_k`, `window_fraction`, and execution thresholds interact in ways that are not explicitly modeled by the objective function. The TPE sampler must explore this space without prior knowledge of parameter dependencies, increasing variance and computational cost.
 
-**Distributional Wasserstein at scale.** FAPT's current implementation computes distance on per-feature scalar summaries rather than full multivariate distributions. True distributional Wasserstein over high-dimensional feature spaces would be more theoretically grounded but substantially more expensive across thousands of historical windows at inference time.
+**Continuous regime matching with approximate distance metrics.** FAPT operates in a continuous regime space using Wasserstein distance to compare feature distributions. However, the current implementation approximates distributions using per-feature scalar summaries rather than full multivariate representations. This reduces computational complexity but introduces a trade-off between accuracy and scalability when performing distance-weighted parameter interpolation across many historical windows.
 
 ---
 
 ## Known Limitations
 
-- **FAPT regime library is asset-specific.** Infrastructure is complete; regime library requires rebuild for the current data pipeline.
-- **Backtest fee assumptions are optimistic.** Backtest uses 0.095% maker/taker; live execution fees differ by tier and order type. This is a known source of performance overestimation.
-- **Scalar Wasserstein in FAPT.** Current regime matching computes distance on per-feature scalars (effectively L1), not full multivariate distributions. Regime discrimination accuracy may be reduced.
-- **Single-position constraint.** The system enforces at most one open position at a time. Design choice.
-- **Cross-asset features not wired to crypto context.** SPY/QQQ/DIA/VXX features are engineered but unused in the current pipeline. No crypto-native equivalent (e.g., BTC dominance, ETH/BTC ratio) has been substituted.
+* **FAPT regime library is asset-specific.** Infrastructure is complete. The regime library must be rebuilt for each data domain to ensure consistency with the current feature pipeline and optimization objective.
+  
+* **Approximate distributional representation in FAPT.** Regime similarity is currently computed using scalar feature summaries rather than full multivariate distributions. This may reduce the fidelity of regime matching, particularly in higher-dimensional feature interactions.
+  
+* **Single-position constraint.** The system enforces at most one open position at a time. This simplifies execution logic but limits capital utilization and strategy expressiveness.
+  
+* **Cross-asset features not wired to crypto context.** Equity-based context features (SPY, QQQ, DIA, VXX) are engineered but not currently used. No crypto-native equivalents (e.g., BTC dominance, ETH/BTC ratio) have been integrated yet.
+
+---
+
+## Design Trade-offs
+
+* **Conservative fee modeling.** Backtests use a fixed fee of 0.095%, representing a worst-case execution scenario. This is intentionally conservative and forces the optimization process to favor strategies that remain profitable under tight cost constraints. The goal is robustness rather than optimistic performance estimation.
 
 ---
 
 ## Roadmap
 
-- **FAPT migration.** Rebuild the per-window regime library using current pipeline data and joint optimization objective. Highest-priority architectural item.
-- **Multivariate distributional Wasserstein.** Replace scalar-level distance with Wasserstein on PCA-reduced feature embeddings for more accurate regime matching.
-- **Fee-corrected backtest configuration.** Introduce live-equivalent fee parameters as a named configuration to produce realistic performance benchmarks.
-- **Crypto-native cross-asset context.** Replace equity indices with BTC dominance, ETH/BTC ratio, or crypto volatility indices as cross-asset context features.
-- **Calibrated confidence-weighted sizing.** Replace magnitude-proxy aggressiveness scaling with a calibrated probability estimate for more principled position sizing.
+* **FAPT migration.** Rebuild the regime library using the current pipeline and joint optimization objective. This is the highest-priority architectural task.
+
+* **Improved regime representation.** Extend FAPT to operate on multivariate feature embeddings (e.g., PCA-reduced space) for more accurate Wasserstein distance computation.
+
+* **Configurable fee models.** Introduce configurable fee structures to allow comparison between conservative and realistic execution assumptions.
+
+* **Crypto-native cross-asset context.** Replace equity-based signals with crypto-relevant context features such as BTC dominance, ETH/BTC ratio, or crypto volatility indices.
+
+* **Confidence-calibrated position sizing.** Replace magnitude-based aggressiveness scaling with calibrated probability estimates for more principled risk allocation.
+
 
 ---
