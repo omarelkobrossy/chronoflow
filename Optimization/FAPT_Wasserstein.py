@@ -2,9 +2,20 @@ import pandas as pd
 import numpy as np
 import json
 import joblib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from scipy.stats import wasserstein_distance
 # from FAPT_Metamodel_Feature_Importance import N_FEATURES_TO_SELECT
+
+# Number of nearest historical windows to blend.
+# Inverse-distance weights concentrate naturally on the closest regime,
+# so this degrades gracefully toward nearest-neighbor when one window is clearly dominant.
+K_NEAREST = 5
+
+# Parameters that must be integers after interpolation (rounded, not floored).
+DISCRETE_PARAMS = {
+    'min_holding_period', 'max_holding_period', 'max_concurrent_trades',
+    'n_estimators', 'max_depth', 'max_leaves', 'feature_count_k',
+}
 
 def get_top_market_weather_features(symbol: str) -> List[str]:
     """
@@ -103,38 +114,69 @@ def predict_optimal_parameters(current_features: Dict[str, float], symbol: str =
     with open(f'Parameters/{symbol}_Aggregated_Optimization.json', 'r') as f:
         optimization_results = json.load(f)
     
-    # Find the window with the minimum Wasserstein distance
-    best_window = None
-    min_distance = float('inf')
-    
+    # ── Collect distances for every qualifying window ─────────────────────────
+    window_distances: List[Tuple[float, Dict]] = []
+
     for window in optimization_results['results']:
-        if 'feature_metrics' in window:
-            # Extract only the selected features from the window
-            window_features = {}
-            for feature, metrics in window['feature_metrics'].items():
-                for metric_name, value in metrics.items():
-                    feature_name = f"{feature}_{metric_name}"
-                    if feature_name in selected_features:
-                        window_features[feature_name] = value
-            
-            # Only proceed if we have all required features
-            if all(feature in window_features for feature in selected_features):
-                distance = calculate_feature_distances(current_features, window_features, selected_features)
-                
-                if distance < min_distance:
-                    min_distance = distance
-                    best_window = window
-    
-    if best_window is None:
+        if 'feature_metrics' not in window:
+            continue
+
+        # Flatten nested feature_metrics into the same key format as current_features
+        window_features: Dict[str, float] = {}
+        for feature, metrics in window['feature_metrics'].items():
+            for metric_name, value in metrics.items():
+                feature_name = f"{feature}_{metric_name}"
+                if feature_name in selected_features:
+                    window_features[feature_name] = value
+
+        # Skip windows that are missing any of the selected features
+        if not all(f in window_features for f in selected_features):
+            continue
+
+        distance = calculate_feature_distances(current_features, window_features, selected_features)
+        window_distances.append((distance, window))
+
+    if not window_distances:
         raise ValueError("No matching parameters found in optimization results")
-    
-    # Extract parameters from the best window
-    parameters = best_window.get('best_parameters', {})
-    
-    if not parameters:
-        print("Warning: No parameters found in the best window. Window structure:", json.dumps(best_window, indent=2))
-    
-    # Ensure all required parameters are present with default values if missing
+
+    # ── K-nearest selection ───────────────────────────────────────────────────
+    window_distances.sort(key=lambda x: x[0])
+    nearest_k = window_distances[:K_NEAREST]
+
+    # ── Inverse-distance weights ──────────────────────────────────────────────
+    # w_i = (1 / d_i) / Σ(1 / d_j)
+    # If an exact match exists (d=0) it absorbs all weight, which is correct.
+    inv_distances = [1.0 / d if d > 0 else float('inf') for d, _ in nearest_k]
+
+    if any(w == float('inf') for w in inv_distances):
+        # Exact match: give full weight to the zero-distance window(s)
+        total = sum(1 for w in inv_distances if w == float('inf'))
+        weights = [1.0 / total if w == float('inf') else 0.0 for w in inv_distances]
+    else:
+        total_inv = sum(inv_distances)
+        weights = [w / total_inv for w in inv_distances]
+
+    # ── Interpolate parameters across K nearest windows ───────────────────────
+    # Gather the union of all parameter keys present in the K windows
+    all_param_keys: set = set()
+    for _, window in nearest_k:
+        all_param_keys.update(window.get('best_parameters', {}).keys())
+
+    interpolated: Dict[str, Any] = {}
+    for key in all_param_keys:
+        weighted_sum = 0.0
+        weight_sum   = 0.0
+        for (_, window), w in zip(nearest_k, weights):
+            val = window.get('best_parameters', {}).get(key)
+            if val is not None:
+                weighted_sum += w * float(val)
+                weight_sum   += w
+        if weight_sum > 0:
+            blended = weighted_sum / weight_sum
+            # Round discrete parameters; leave continuous ones as floats
+            interpolated[key] = round(blended) if key in DISCRETE_PARAMS else blended
+
+    # ── Fill any missing parameters with safe defaults ────────────────────────
     required_parameters = {
         'min_risk_percentage': 0.005,
         'max_risk_percentage': 0.02,
@@ -148,20 +190,28 @@ def predict_optimal_parameters(current_features: Dict[str, float], symbol: str =
         'window_fraction': 0.01,
         'retrain_fraction': 0.05
     }
-    
-    # Update parameters with any missing values from defaults
     for param, default_value in required_parameters.items():
-        if param not in parameters:
-            parameters[param] = default_value
-    
-    # Return the parameters from the best matching window
+        if param not in interpolated:
+            interpolated[param] = default_value
+
+    # ── Build contribution metadata for inspection / logging ─────────────────
+    contributing_windows = [
+        {
+            'window_id': window.get('window_id', 'unknown'),
+            'wasserstein_distance': dist,
+            'weight': w,
+            'performance_metrics': window.get('performance_metrics', {}),
+        }
+        for (dist, window), w in zip(nearest_k, weights)
+    ]
+
     return {
-        'parameters': parameters,
+        'parameters': interpolated,
         'predicted_sharpe': predicted_sharpe,
-        'wasserstein_distance': min_distance,
-        'performance_metrics': best_window.get('performance_metrics', {}),
+        'wasserstein_distance': nearest_k[0][0],   # closest window distance
+        'contributing_windows': contributing_windows,
+        'k_nearest': len(nearest_k),
         'selected_features': selected_features,
-        'window_id': best_window.get('window_id', 'unknown')
     }
 
 # Example usage:
