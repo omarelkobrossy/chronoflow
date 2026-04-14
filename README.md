@@ -284,18 +284,3 @@ Both modes share `GatherData.py`, ensuring training and inference operate on ide
 * **Conservative fee modeling.** Backtests use a fixed fee of 0.095%, representing a worst-case execution scenario. This is intentionally conservative and forces the optimization process to favor strategies that remain profitable under tight cost constraints. The goal is robustness rather than optimistic performance estimation.
 
 ---
-
-## Roadmap
-
-* **FAPT migration.** Rebuild the regime library using the current pipeline and joint optimization objective. This is the highest-priority architectural task.
-
-* **Improved regime representation.** Extend FAPT to operate on multivariate feature embeddings (e.g., PCA-reduced space) for more accurate Wasserstein distance computation.
-
-* **Configurable fee models.** Introduce configurable fee structures to allow comparison between conservative and realistic execution assumptions.
-
-* **Crypto-native cross-asset context.** Replace equity-based signals with crypto-relevant context features such as BTC dominance, ETH/BTC ratio, or crypto volatility indices.
-
-* **Confidence-calibrated position sizing.** Replace magnitude-based aggressiveness scaling with calibrated probability estimates for more principled risk allocation.
-
-
----
