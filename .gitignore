@@ -20,6 +20,7 @@ settings/*.pem
 # ── Data and generated output ──────────────────────
 DB/*
 Visualization/*
+visuals/*.html
 
 # ── Project-specific ignores ─────────────────
 CLAUDE.md
