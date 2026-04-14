@@ -154,8 +154,6 @@ Execution parameters:
 
 The rationale: model expressiveness and signal threshold calibration interact. A high-sensitivity model requires tighter execution filters; a conservative model may benefit from more aggressive sizing. Separating these optimizations introduces a coupling error that joint optimization avoids.
 
-Best result: `MAR=6167, Sharpe=0.855, win_rate=52.3%, max_DD=-14.4%` (2,449 trades, walk-forward evaluation).
-
 ---
 
 ### 3. PSI-Triggered Adaptive Retraining
