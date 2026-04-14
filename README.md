@@ -127,7 +127,7 @@ flowchart LR
 
 ---
 
-## Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Similarity)
+## Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Distance Approximation)
 
 <p align="center">
   <img src="./visuals/docs/faptdemo.png" width="1200"/>
