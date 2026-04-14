@@ -135,6 +135,10 @@ Fully implemented. Computationally expensive due to per-window optimization. Pre
 
 Model architecture and execution parameters are not optimized independently. They are co-evolved in a single joint Optuna study.
 
+<p align="center">
+  <img src="./visuals/docs/jointoptimization.png" width="1200"/>
+</p>
+
 ```
 Trials:    6,000 (Optuna TPE sampler, SQLite-backed, resumable)
 Objective: MAR = Final Capital / Initial Capital ÷ Max Drawdown Fraction
@@ -171,6 +175,10 @@ PSI = Σ (actual_pct − expected_pct) × ln(actual_pct / expected_pct)
 
 
 A 50-bar cooldown prevents retraining cascades. This makes model lifecycle management **event-driven and statistically justified**, rather than time-driven.
+
+<p align="center">
+  <img src="./visuals/docs/psi.png" width="1200"/>
+</p>
 
 ---
 
