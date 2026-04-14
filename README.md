@@ -127,6 +127,15 @@ flowchart LR
 
 ---
 
+### Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Similarity)
+Projection of high-dimensional feature distributions into 3D space for visualization of regime similarity and parameter blending
+
+<p align="center">
+  <img src="./visuals/docs/faptdemo.png" width="1200"/>
+</p>
+
+---
+
 ### Offline Phase (AWS Batch)
 
 * Historical data is divided into rolling windows
