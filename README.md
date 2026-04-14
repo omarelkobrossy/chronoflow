@@ -22,59 +22,9 @@ This system's thesis: **a model that adapts its parameters based on detected reg
 
 ## System at a Glance
 
-```mermaid
-flowchart TD
-    subgraph Data["Data Layer"]
-        HIST["Historical OHLCV<br>Warmup Window"]
-        LIVE["Live Time-Series Stream<br>Incremental Updates"]
-    end
-
-    subgraph Features["Feature Engineering (GatherData.py)"]
-        SHIFT["Universal .shift(1) Anti-Leakage Gate"]
-        FE["200+ Features<br>Momentum · Volatility · Structure<br>VWAP · Volume · Cross-Asset"]
-        SCALE["Expanding Z-Score Scaler<br>Past-Only Statistics"]
-    end
-
-    subgraph Optimization["Optimization Layer"]
-        JOINT["Joint Optuna Study<br>Model + Execution Parameters"]
-        WF["Walk-Forward Evaluation<br>Temporal Train/Test Splits"]
-        MAR["Objective: MAR<br>Return / Max Drawdown"]
-    end
-
-    subgraph Adaptation["Adaptation Layer"]
-        PSI["PSI Drift Monitor<br>Per-Bar Distribution Check"]
-        RETRAIN["Triggered Retrain<br>Threshold-Governed"]
-        FAPT["FAPT Engine<br>Wasserstein Regime Matching"]
-        AWS["Distributed AWS Batch<br>Parallel Per-Window Optimization"]
-    end
-
-    subgraph Model["Model Layer"]
-        XGB["XGBoost Regressor"]
-        SEL["Top-K Feature Selection<br>Importance-Ranked, Walk-Forward"]
-        TARGET["Target: Price_Change_5<br>Short-Horizon Return Signal"]
-    end
-
-    subgraph Execution["Execution Layer (Application)"]
-        SIG["Signal Threshold<br>Prediction vs. min_move"]
-        SIZE["Aggressiveness-Scaled<br>Position Sizing"]
-        ORDER["Bracket Order Execution<br>Fee-Aware TP/SL Placement"]
-    end
-
-    HIST --> SHIFT
-    LIVE --> SHIFT
-    SHIFT --> FE --> SCALE --> SEL --> XGB
-    TARGET --> XGB
-
-    JOINT --> WF --> MAR
-    MAR --> XGB
-
-    PSI -->|drift detected| RETRAIN --> XGB
-    AWS -->|regime library| FAPT --> XGB
-
-    XGB --> SIG --> SIZE --> ORDER
-```
-
-
+<p align="center">
+  <img src="./visuals/docs/overview.png" width="1200"/>
+</p>
 
 ---
 
@@ -108,26 +58,13 @@ This results in behavior such as:
 
 ### Pipeline
 
-```mermaid
-flowchart LR
-    A[Full History] --> B[Rolling Window Slicing]
-    B --> C[Per-Window Optuna Optimization]
-    C --> D[Regime Library<br>params + feature distributions]
-
-    E[Current Market Window] --> F[Feature Distribution]
-    F --> G[Wasserstein Distance<br>to each historical window]
-
-    D --> G
-    G --> H[Top-K Similar Regimes]
-
-    H --> I[Distance-Weighted<br>Parameter Blending]
-
-    I --> J[Deploy Adapted Parameters]
-```
+<p align="center">
+  <img src="./visuals/docs/pipeline.png" width="1200"/>
+</p>
 
 ---
 
-## Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Similarity)
+## Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Distance Approximation)
 
 <p align="center">
   <img src="./visuals/docs/faptdemo.png" width="1200"/>
@@ -145,6 +82,10 @@ flowchart LR
 ---
 
 ### Offline Phase (AWS Batch)
+
+<p align="center">
+  <img src="./visuals/docs/awsbatchflow.png" width="1200"/>
+</p>
 
 * Historical data is divided into rolling windows
 * Each window runs an independent optimization study
@@ -235,21 +176,9 @@ A 50-bar cooldown prevents retraining cascades. This makes model lifecycle manag
 
 ### 4. Walk-Forward Training with Dynamic Feature Selection
 
-```mermaid
-flowchart LR
-    A[Full History] --> B[Walk-Forward Splits]
-    B --> C[Train Window]
-    B --> D[Test Window]
-    C --> E[Feature Importance Ranking]
-    E --> F[Top-K Selection<br>K is an optimized parameter]
-    F --> G[XGBoost Training]
-    G --> H[Expanding Z-Score Scaler<br>Fit on Train Only]
-    H --> I[Serialized Model + Scaler + Feature List]
-    I --> J[Evaluation on Test Window]
-    J --> K[MAR Objective]
-```
-
-
+<p align="center">
+  <img src="./visuals/docs/featureselection.png" width="1200"/>
+</p>
 
 - **Window size** is a tunable fraction of available history (clamped: 300–50,000 bars)
 - **Feature count K** is tuned by Optuna. The system learns how many features is optimal, not just which ones.
