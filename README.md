@@ -127,12 +127,20 @@ flowchart LR
 
 ---
 
-### Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Similarity)
-Projection of high-dimensional feature distributions into 3D space for visualization of regime similarity and parameter blending
+## Regime Space Projection and Distance-Weighted Parameter Interpolation (Wasserstein Similarity)
 
 <p align="center">
   <img src="./visuals/docs/faptdemo.png" width="1200"/>
 </p>
+
+*Projection of high-dimensional feature distributions into 3D space for visualization of regime similarity and parameter blending*
+
+- Each point represents a **market state embedded in regime space**, derived from feature distribution statistics.  
+- The visualization shows a **3D projection** of this space. The true regime space is **high-dimensional (50D+)**.  
+- Regime clusters represent historical windows with **locally optimized parameter configurations**.  
+- The current market state is positioned relative to these clusters based on **Wasserstein distance between feature distributions**.  
+- Parameter selection is performed via **distance-weighted interpolation across multiple nearby regimes**, not discrete nearest-neighbor selection.  
+- The projection is illustrative. Distances and structure reflect similarity relationships but are **compressed from higher-dimensional geometry**.
 
 ---
 
