@@ -284,3 +284,25 @@ Both modes share `GatherData.py`'s features, ensuring training and inference ope
 * **Conservative fee modeling.** Backtests use a fixed fee of 0.095%, representing a worst-case execution scenario. This is intentionally conservative and forces the optimization process to favor strategies that remain profitable under tight cost constraints. The goal is robustness rather than optimistic performance estimation.
 
 ---
+
+## Research Extensions (Not Included in This Repository)
+
+This repository presents a simplified version of the full system, focusing on core architectural ideas rather than proprietary extensions.
+
+Several known limitations of the current implementation, such as:
+
+* approximation in regime matching
+* scalar feature representation in distance calculations
+* and direct parameter interpolation
+
+can be addressed through more advanced modeling approaches.
+
+In particular, these include:
+
+* richer regime representations beyond single-layer feature distributions
+* hierarchical or multi-scale regime modeling
+* learned mappings from market state to parameter configurations
+
+These extensions allow for more expressive parameter inference and improved stability across complex regime transitions.
+
+They are intentionally not included here, as the goal of this repository is to demonstrate the underlying system design rather than expose full production methodology.
