@@ -251,7 +251,7 @@ Parameters/
 - **Backtest / Optimization** (`TradingStrategy_JointOptimization.py`): walk-forward loop with Optuna, SQLite persistence, `SKIP_OPTIMIZATION` flag to replay specific parameters
 - **Live Inference** (broker bot files): WebSocket-driven, stateful incremental updates, in-process PSI monitoring and retraining
 
-Both modes share `GatherData.py`, ensuring training and inference operate on identical feature computation logic.
+Both modes share `GatherData.py`'s features, ensuring training and inference operate on identical feature computation logic.
 
 ---
 
