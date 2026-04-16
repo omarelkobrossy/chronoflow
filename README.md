@@ -311,4 +311,5 @@ In more complete variants of the system, additional layers are used to improve r
 These extensions allow for more expressive parameter inference and improved stability across complex regime transitions.
 
 They are intentionally not included here, as the goal of this repository is to demonstrate the underlying system design rather than expose full production methodology.
-These components are standard in production-grade systems but are outside the scope of this public implementation.
+
+These components are intentionally abstracted, as their effectiveness depends heavily on implementation-specific design choices around model stability, overfitting control, and selection criteria, which are a key part of the system’s overall behavior.
