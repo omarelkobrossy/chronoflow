@@ -480,14 +480,8 @@ def calculate_technical_indicators(df, market_data=None, timeframe=1):
     df["BB_Lower"] = df["BB_Middle"] - 2 * df["Close"].shift(1).rolling(window=20).std()
     
     # Price momentum with adjusted periods
-    df["Price_Change"] = df["Close"].shift(1).pct_change()
-    df["Price_Change_5"] = df["Close"].shift(1).pct_change(periods=5)
-    df["Price_Change_10"] = df["Close"].shift(1).pct_change(periods=10)
-    df["Price_Change_15"] = df["Close"].shift(1).pct_change(periods=15)
-    df["Price_Change_20"] = df["Close"].shift(1).pct_change(periods=20)
-    df["Price_Change_30"] = df["Close"].shift(1).pct_change(periods=30)
-    df["Price_Change_45"] = df["Close"].shift(1).pct_change(periods=45)
-    df["Price_Change_60"] = df["Close"].shift(1).pct_change(periods=60)
+    df["Price_Change"] = df["Close"].shift().pct_change()
+    df["Price_Change_5"] = df["Close"].pct_change(5).shift(-5)
     
     # Candlestick Direction
     df["Candle_Direction"] = np.where(df["Close"].shift(1) >= df["Open"].shift(1), 1, -1)
