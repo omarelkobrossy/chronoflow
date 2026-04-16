@@ -291,18 +291,24 @@ This repository presents a simplified version of the full system, focusing on co
 
 Several known limitations of the current implementation, such as:
 
-* approximation in regime matching
-* scalar feature representation in distance calculations
-* and direct parameter interpolation
+* approximation in regime matching  
+* scalar feature representation in distance calculations  
+* and direct parameter interpolation  
 
 can be addressed through more advanced modeling approaches.
 
 In particular, these include:
 
-* richer regime representations beyond single-layer feature distributions
-* hierarchical or multi-scale regime modeling
-* learned mappings from market state to parameter configurations
+* richer regime representations beyond single-layer feature distributions  
+* hierarchical or multi-scale regime modeling  
+* learned mappings from market state to parameter configurations  
+
+In more complete variants of the system, additional layers are used to improve robustness and generalization, including:
+- model selection and validation workflows designed to reduce overfitting  
+- monitoring and filtering mechanisms for unstable or degraded model configurations  
+- selection logic for choosing between competing parameter or model candidates  
 
 These extensions allow for more expressive parameter inference and improved stability across complex regime transitions.
 
 They are intentionally not included here, as the goal of this repository is to demonstrate the underlying system design rather than expose full production methodology.
+These components are standard in production-grade systems but are outside the scope of this public implementation.
