@@ -283,6 +283,12 @@ Both modes share `GatherData.py`'s features, ensuring training and inference ope
 
 * **Conservative fee modeling.** Backtests use a fixed fee of 0.095%, representing a worst-case execution scenario. This is intentionally conservative and forces the optimization process to favor strategies that remain profitable under tight cost constraints. The goal is robustness rather than optimistic performance estimation.
 
+* **Per-split feature importance recomputation.** Feature importance is recalculated at every walk-forward split rather than using a static feature set. This is computationally more expensive, but empirical testing showed it produces more stable and higher-quality signals than training on the full feature set without selection. The added cost is traded for improved generalization.
+
+* **PSI-driven retraining vs fixed cadence.** Retraining is triggered by distribution drift (PSI) instead of occurring at fixed intervals (e.g., every K bars). This reduces unnecessary retraining cycles and improves both model efficiency and runtime performance, while maintaining responsiveness to meaningful regime shifts.
+
+* **Simple objective over composite metrics.** Optimization is performed using a single risk-adjusted metric (MAR) rather than complex multi-objective formulas combining CAGR, trade count, win rate, and other factors. In practice, simpler objectives proved more effective at discovering robust edges and avoided overfitting to secondary metrics.
+
 ---
 
 ## Research Extensions (Not Included in This Repository)
