@@ -32,11 +32,9 @@ This system's thesis: **a model that adapts its parameters based on detected reg
 
 ### 1. Wasserstein Regime Adaptation (FAPT - Feature Aggregation Parameter Tuning)
 
-FAPT rejects the premise that a single globally optimal parameter set exists.
-
 Rather than treating optimization as a nearest-neighbor lookup, FAPT models parameter selection as a **continuous function over regime space**, using distributional similarity to interpolate between historically optimal configurations.
 
-**The insight:** Historical market windows are not discrete states but points in a continuous space of market conditions. A parameter set optimized for one regime may still be partially valid in a nearby regime. Instead of selecting a single closest match, the system blends information from multiple regimes based on similarity.
+Historical market windows are not discrete states but points in a continuous space of market conditions. A parameter set optimized for one regime may still be partially valid in a nearby regime. Instead of selecting a single closest match, the system blends information from multiple regimes based on similarity.
 
 ---
 
